@@ -79,7 +79,7 @@ flowchart LR
 
 ```
 com.daveai.searchengine
-├── core          Token, Posting, Document, SearchResult
+├── models        Token, Posting, Document, SearchResult
 ├── indexing      TextProcessor, Indexer, InvertedIndex, DocumentStore
 ├── extraction    TextExtractor, ExtractorFactory, per-format extractors, DocumentLoader
 ├── autocomplete  Trie, TrieNode
