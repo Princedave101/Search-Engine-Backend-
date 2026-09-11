@@ -1,0 +1,9 @@
+Welcome to the University Intranet
+
+The intranet gives students and staff one place to find course material, departmental
+announcements, examination timetables and library resources.
+
+Students can download lecture notes, submit assignments and check their results.
+Staff can publish announcements and upload teaching material for their courses.
+
+For help with your account, contact the ICT support desk in the Faculty of Science building.

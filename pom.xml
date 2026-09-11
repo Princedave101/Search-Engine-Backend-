@@ -28,11 +28,63 @@
     </scm>
     <properties>
         <java.version>25</java.version>
+        <tika.version>4.0.0</tika.version>
+        <antlr.version>4.13.2</antlr.version>
     </properties>
     <dependencies>
         <dependency>
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-webmvc</artifactId>
+        </dependency>
+
+        <!-- Text extraction (T5). Only the parser modules for the formats in the brief. -->
+        <dependency>
+            <groupId>org.apache.tika</groupId>
+            <artifactId>tika-core</artifactId>
+            <version>${tika.version}</version>
+        </dependency>
+        <dependency>
+            <!-- pdf -->
+            <groupId>org.apache.tika</groupId>
+            <artifactId>tika-parser-pdf-module</artifactId>
+            <version>${tika.version}</version>
+        </dependency>
+        <dependency>
+            <!-- doc, docx, ppt, pptx, pps, ppsx, xls, xlsx -->
+            <groupId>org.apache.tika</groupId>
+            <artifactId>tika-parser-microsoft-module</artifactId>
+            <version>${tika.version}</version>
+        </dependency>
+        <dependency>
+            <!-- html -->
+            <groupId>org.apache.tika</groupId>
+            <artifactId>tika-parser-html-module</artifactId>
+            <version>${tika.version}</version>
+        </dependency>
+        <dependency>
+            <!-- charset detection for html -->
+            <groupId>org.apache.tika</groupId>
+            <artifactId>tika-encoding-detector-html</artifactId>
+            <version>${tika.version}</version>
+        </dependency>
+        <dependency>
+            <!-- xml -->
+            <groupId>org.apache.tika</groupId>
+            <artifactId>tika-parser-xml-module</artifactId>
+            <version>${tika.version}</version>
+        </dependency>
+        <dependency>
+            <!-- txt -->
+            <groupId>org.apache.tika</groupId>
+            <artifactId>tika-parser-text-module</artifactId>
+            <version>${tika.version}</version>
+        </dependency>
+
+        <!-- Runtime for the query parser generated from Query.g4 (T7) -->
+        <dependency>
+            <groupId>org.antlr</groupId>
+            <artifactId>antlr4-runtime</artifactId>
+            <version>${antlr.version}</version>
         </dependency>
 
         <dependency>
@@ -52,6 +104,23 @@
             <plugin>
                 <groupId>org.springframework.boot</groupId>
                 <artifactId>spring-boot-maven-plugin</artifactId>
+            </plugin>
+            <!-- Generates the query lexer, parser and visitor from src/main/antlr4/**/*.g4 at compile time (T7) -->
+            <plugin>
+                <groupId>org.antlr</groupId>
+                <artifactId>antlr4-maven-plugin</artifactId>
+                <version>${antlr.version}</version>
+                <configuration>
+                    <visitor>true</visitor>
+                    <listener>false</listener>
+                </configuration>
+                <executions>
+                    <execution>
+                        <goals>
+                            <goal>antlr4</goal>
+                        </goals>
+                    </execution>
+                </executions>
             </plugin>
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>

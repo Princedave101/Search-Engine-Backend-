@@ -10,6 +10,14 @@ It is based on `CSC322_final_project.pdf` (the brief) and `CSC322_search_engine_
 - When a task is finished, its **Status** changes and an **Implementation notes** section is added under it, explaining what was built and why.
 - Every change is committed.
 
+**Viewing the diagrams**
+
+The diagrams are written in [Mermaid](https://mermaid.js.org/). They show as plain text in editors that don't support it.
+
+- **IntelliJ IDEA:** go to *Settings → Plugins → Marketplace*, install **Mermaid** (by JetBrains) and restart. Then open this file in the Markdown preview: the split or preview icon at the top right of the editor. On older versions, enable it under *Settings → Languages & Frameworks → Markdown → Markdown Extensions → Mermaid*.
+- **GitHub** displays Mermaid diagrams automatically.
+- You can also paste a single diagram into https://mermaid.live.
+
 ---
 
 ## 1. Requirements checklist (from the brief)
@@ -87,6 +95,7 @@ com.daveai.searchengine
 ├── matching      MatchingEngine
 ├── ranking       RankingAlgorithm, TfIdfRanking, SnippetBuilder
 ├── api           SearchEngineAPI (facade), SearchController, DTOs, error handling
+├── config        SearchProperties (typed search.* settings)
 └── scheduling    RepositoryScanner
 src/main/antlr4/com/daveai/searchengine/query/Query.g4
 src/main/resources/static/   index.html, results.html, document.html
@@ -112,7 +121,7 @@ Design patterns used overall: **Facade** (SearchEngineAPI), **Strategy** (extrac
 
 | ID  | Task                                  | Depends on     | Proposed owner       | Status      |
 |-----|---------------------------------------|----------------|----------------------|-------------|
-| T0  | Project setup and dependencies        | –              | Claude (needs OK)    | Not started |
+| T0  | Project setup and dependencies        | –              | Claude               | Done        |
 | T1  | Core ADTs                             | T0             | You                  | Not started |
 | T2  | TextProcessor                         | T1             | You                  | Not started |
 | T3  | InvertedIndex and DocumentStore       | T1             | You                  | Not started |
@@ -158,14 +167,14 @@ flowchart LR
 
 ### T0 — Project setup and dependencies
 
-**Owner:** Claude (needs OK) · **Status:** Not started
+**Owner:** Claude · **Status:** Done
 
 **Goal:** Add the libraries and configuration the other tasks need.
 
 **Description**
 
 - Add dependencies to `pom.xml`:
-  - **Apache Tika** (`tika-core`, `tika-parsers-standard-package`) to extract text from pdf/doc/docx/ppt/pptx/xls/xlsx/html/xml.
+  - **Apache Tika**, to extract text from pdf/doc/docx/ppt/pptx/xls/xlsx/html/xml. Add `tika-core` plus only the parser modules those formats need: pdf, microsoft, html, xml and text.
   - **ANTLR 4** (`antlr4-runtime` plus `antlr4-maven-plugin`). The plugin generates the parser from `Query.g4` during `mvn compile`, which covers the "parser generator" requirement.
 - Add settings to `application.yaml`:
   ```yaml
@@ -174,7 +183,8 @@ flowchart LR
     reindex-interval: PT30M        # well within the 2-hour limit
     autocomplete-limit: 10
   ```
-- Create `documents/` containing at least one sample file per supported format.
+- Bind those settings to a typed `SearchProperties` record that rejects invalid values at startup, including an interval over 2 hours.
+- Create `documents/` with txt, html and xml samples. Binary samples (pdf and Office formats) are added in T5, where the tests can generate them.
 - Create the empty package structure shown in section 2.
 
 ```mermaid
@@ -186,6 +196,55 @@ flowchart TD
 ```
 
 **Done when:** `mvn test` passes and `mvn spring-boot:run` starts with the new dependencies.
+
+#### Implementation notes
+
+**Dependencies (`pom.xml`)**
+
+- **Tika 4.0.0:** `tika-core` plus the parser modules for pdf, Microsoft Office, html (with `tika-encoding-detector-html`), xml and text.
+  - In Tika 4, `tika-parsers-standard-package` is only a POM. It pulls in about 25 parser modules, including audio, CAD, OCR, mail and crypto.
+  - It also brings `jcl-over-slf4j`, which can clash with Spring's logging.
+  - Listing just the modules we need keeps the build small and shows in the POM exactly which formats are supported.
+- **ANTLR 4.13.2:** `antlr4-runtime` plus `antlr4-maven-plugin`, with visitor generation on and listener generation off.
+  - The plugin looks for grammars in `src/main/antlr4/`.
+  - Until T7 adds `Query.g4` it logs "No ANTLR 4 grammars to compile" and the build carries on.
+
+**Settings**
+
+- The `search.*` values in `application.yaml` are bound to the record `config/SearchProperties`. `@ConfigurationPropertiesScan` on `SearchEngineApplication` enables this.
+- The record's constructor rejects:
+  - missing values
+  - an interval of zero or less, or more than 2 hours
+  - an autocomplete limit below 1
+- A bad setting therefore stops the app at startup with a clear message, instead of causing problems later.
+- Spring turns `./documents` into the path `documents`. Both point to the same folder.
+
+```mermaid
+flowchart LR
+    Y["application.yaml<br/>search.*"] --> B["Spring reads the values"]
+    B --> S["new SearchProperties(...)"]
+    S --> V{"valid?"}
+    V -- no --> F["startup fails with a clear message"]
+    V -- yes --> OK["SearchProperties bean available to other classes"]
+```
+
+**Packages:** each package from section 2 has a `package-info.java`. Git doesn't track empty folders, so this keeps the layout in the repository, and each file states what its package is for.
+
+**Sample documents:** `documents/welcome.txt`, `documents/computer-science-department.html` and `documents/course-catalogue.xml`.
+
+**Tests (11, all passing)**
+
+| Test class                     | Tests | Checks                                                              |
+|--------------------------------|-------|---------------------------------------------------------------------|
+| `SearchPropertiesTest`         | 6     | Validation rules, including the 2-hour limit                        |
+| `SearchPropertiesBindingTests` | 1     | Values from `application.yaml` reach the record                     |
+| `TikaDependencyTest`           | 3     | Tika reads text from the txt, html and xml samples. Temporary: T5 replaces it. |
+| `SearchEngineApplicationTests` | 1     | The Spring context starts                                           |
+
+**Verified**
+
+- `mvn test`: BUILD SUCCESS.
+- `mvn spring-boot:run`: Tomcat starts on port 8080 in about 6 s. `GET /` returns 404, which is expected because no endpoints exist yet.
 
 ---
 

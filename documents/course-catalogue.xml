@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<catalogue department="Computer Science">
+    <course code="CSC322">
+        <title>A Modern Programming Language</title>
+        <description>
+            Design and implementation of abstract data types, common design patterns and
+            parser generators, applied through a search engine project.
+        </description>
+        <units>3</units>
+    </course>
+    <course code="CSC311">
+        <title>Data Structures and Algorithms</title>
+        <description>
+            Lists, stacks, queues, trees, hash tables and graphs, with analysis of algorithm
+            running time and memory usage.
+        </description>
+        <units>3</units>
+    </course>
+    <course code="CSC341">
+        <title>Machine Learning</title>
+        <description>
+            Supervised and unsupervised learning, including regression, classification,
+            clustering and neural networks.
+        </description>
+        <units>3</units>
+    </course>
+</catalogue>

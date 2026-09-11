@@ -1,3 +1,11 @@
 spring:
   application:
     name: SearchEngine
+
+search:
+  # Folder whose files are indexed (the "document repository" from the brief).
+  repository-path: ./documents
+  # How often the repository is rescanned. Must not exceed 2 hours (brief requirement).
+  reindex-interval: PT30M
+  # Maximum number of autocomplete suggestions returned.
+  autocomplete-limit: 10
