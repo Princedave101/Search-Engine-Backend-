@@ -122,7 +122,7 @@ Design patterns used overall: **Facade** (SearchEngineAPI), **Strategy** (extrac
 | ID  | Task                                  | Depends on     | Proposed owner       | Status      |
 |-----|---------------------------------------|----------------|----------------------|-------------|
 | T0  | Project setup and dependencies        | –              | Claude               | Done        |
-| T1  | Core ADTs                             | T0             | You                  | Not started |
+| T1  | Core ADTs                             | T0             | You + Claude         | Done        |
 | T2  | TextProcessor                         | T1             | You                  | Not started |
 | T3  | InvertedIndex and DocumentStore       | T1             | You                  | Not started |
 | T4  | Indexer                               | T2, T3, T6     | You                  | Not started |
@@ -250,7 +250,7 @@ flowchart LR
 
 ### T1 — Core ADTs
 
-**Owner:** You · **Status:** Not started
+**Owner:** You + Claude · **Status:** Done
 
 **Goal:** Build the four small immutable types used by every other module.
 
@@ -261,9 +261,12 @@ Use Java `record`s. They are immutable, which also makes them safe to read from 
 | Type           | Fields                                                  | Rules to enforce                                   |
 |----------------|---------------------------------------------------------|----------------------------------------------------|
 | `Token`        | `value`, `documentId`, `position`                       | `value` not blank; `position >= 0`                 |
-| `Posting`      | `documentId`, `frequency`, `positions: List<Integer>`   | `frequency >= 1`; `frequency == positions.size()`; defensive copy of the list |
-| `Document`     | `id`, `title`, `rawText`, `sourcePath`                  | `id` not blank; `rawText` not null (may be empty)  |
-| `SearchResult` | `documentId`, `title`, `snippet`, `score`               | `score >= 0`                                       |
+| `Posting`      | `documentId`, `frequency`, `positions: List<Integer>`   | `documentId` not blank; `frequency >= 1`; `frequency == positions.size()`; positions `>= 0` and strictly increasing; defensive copy of the list |
+| `Document`     | `id`, `title`, `rawText`                                | `id` not blank; `rawText` not null (may be empty)  |
+| `SearchResult` | `documentId`, `title`, `snippet`, `score`               | `score >= 0` and not NaN                           |
+
+- A null value throws `NullPointerException`, for example via `Objects.requireNonNull`. An invalid value throws `IllegalArgumentException`.
+- `Document` has no `sourcePath`. Its `id` is the file's path relative to `documents/`, so the original file can be found from the id.
 
 ```mermaid
 flowchart TD
@@ -275,11 +278,45 @@ flowchart TD
 
 **Tests first**
 
-- Invalid input throws `IllegalArgumentException` / `NullPointerException` (blank id, frequency 0, negative position).
-- A `Posting`'s positions list cannot be changed from outside after construction.
+Written in `src/test/java/com/daveai/searchengine/models/`: `PostingTest`, `TokenTest`, `DocumentTest` and `SearchResultTest`.
+
+- Each rule in the table above has a test.
+- A `Posting`'s positions list cannot be changed after construction, either through the original list or through the accessor.
 - Two records with equal fields are `equals` and have the same `hashCode`.
 
 **Done when:** all four records exist with tests covering every rule above.
+
+#### Implementation notes
+
+**Who did what:** you wrote the four records and their fields. Claude wrote the tests, then added the validation to make them pass.
+
+**How the rules are enforced:** each record has a *compact constructor*: a constructor with no parameter list that runs before the fields are assigned. An invalid object therefore can't be created at all.
+
+```mermaid
+flowchart TD
+    A["new Posting(documentID, frequency, positions)"] --> B{"documentID null or blank?"}
+    B -- yes --> X["throw"]
+    B -- no --> C{"positions null?"}
+    C -- yes --> X
+    C -- no --> D{"frequency < 1 or != positions.size()?"}
+    D -- yes --> X
+    D -- no --> E["positions = List.copyOf(positions)"]
+    E --> F{"each position >= 0 and larger than the previous one?"}
+    F -- no --> X
+    F -- yes --> G["Posting created"]
+```
+
+**Decisions**
+
+- **`Posting` copies its list** with `List.copyOf`. The copy can't be modified, and changing the caller's original list no longer affects the index. The ordering check runs on this copy.
+- **Positions must be strictly increasing** (for example `[1, 5, 9]`). Phrase matching in T8 relies on reading positions in order.
+- **`SearchResult` rejects NaN scores.** `score < 0` alone is false for NaN, so the check is `Double.isNaN(score) || score < 0`.
+- **`Token` doesn't validate `documentID`.** Query tokens (T2/T7) might not belong to any document.
+- **`Document` allows empty `rawText`,** so a file with no extractable text can still be found by its title.
+
+**Field names:** these stay as you wrote them: `documentID`, and `Token.positions` for a single position. Renaming them to `documentId` and `position` is still recommended. Use Shift+F6 in IntelliJ, which renames every usage including the tests.
+
+**Tests:** 28 model tests plus the 11 from T0. All 39 pass (`mvn test`: BUILD SUCCESS).
 
 ---
 
