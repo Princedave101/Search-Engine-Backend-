@@ -123,7 +123,7 @@ Design patterns used overall: **Facade** (SearchEngineAPI), **Strategy** (extrac
 |-----|---------------------------------------|----------------|----------------------|-------------|
 | T0  | Project setup and dependencies        | –              | Claude               | Done        |
 | T1  | Core ADTs                             | T0             | You + Claude         | Done        |
-| T2  | TextProcessor                         | T1             | You                  | Not started |
+| T2  | TextProcessor                         | T1             | You                  | Done        |
 | T3  | InvertedIndex and DocumentStore       | T1             | You                  | Not started |
 | T4  | Indexer                               | T2, T3, T6     | You                  | Not started |
 | T5  | Text extraction (Strategy + Factory)  | T1             | Claude (needs OK)    | Not started |
@@ -322,43 +322,114 @@ flowchart TD
 
 ### T2 — TextProcessor
 
-**Owner:** You · **Status:** Not started
+**Owner:** You · **Status:** Done
 
 **Goal:** Turn raw text into normalised `Token`s. The same code runs for documents and queries, so their terms always match.
 
 **Description**
 
-1. Return an empty list if the text is null or blank.
-2. Split into words on anything that is not a letter or digit: regex `[^\p{L}\p{N}]+`. Unicode classes are used so non-English letters survive.
-3. Lowercase each word with `Locale.ROOT`.
-4. Give each word its **position in the original word sequence, counted before stop words are removed**. This keeps phrase matching correct: in "state of the art", "state" is position 0 and "art" is position 3.
-5. Drop stop words. Load the list from `src/main/resources/stopwords.txt` so it can change without recompiling.
-6. *(Optional)* Stem words, for example with a Porter stemmer, so "running" matches "run". If you do this, apply it here only, so both pipelines stay identical.
+`processText` **never reads a file.** By the time it runs, the text has already been extracted from the file (T5) and is passed in as a `String`. `documentID` is only a label copied onto every `Token`, so the index knows which document each word came from.
+
+**Once, in the constructor**
+
+- Load `src/main/resources/static/stopwords.txt` (one word per line) into a `Set<String>`.
+  - It is loaded from the classpath with `new ClassPathResource("static/stopwords.txt")`.
+  - It is in `static/` on purpose: Spring serves that folder publicly, so anyone can view the list at `/stopwords.txt`.
+  - A `Set` makes each "is this a stop word?" check O(1).
+
+**On every call to `processText(text, documentID)`**
+
+1. If `text` is null or blank, return an empty list.
+2. Split `text` into words with the regex `[^\p{L}\p{N}]+`: anything that is not a letter or digit separates words. Unicode classes keep non-English letters.
+3. Create an empty list `tokens` and a counter `position = 0`.
+4. For each word, in order:
+   1. **If the word is empty, skip it and don't count it.** Java's `split` returns `""` as the first element when the text starts with punctuation: `", hello"` gives `["", "hello"]`.
+   2. Lowercase it with `toLowerCase(Locale.ROOT)`.
+   3. If it is **not** a stop word, add `new Token(word, documentID, position)`. *(Optional: stem it first, e.g. Porter, so "running" matches "run".)*
+   4. Add 1 to `position`. **This happens for every real word, stop words included.**
+5. Return `tokens`.
+
+**Why stop words still move the counter:** positions must describe the *original* text, or phrase search (T8) breaks. In "state of the art", "state" is at 0 and "art" is at 3. If stop words didn't count, "art" would be at 1 and look like it comes straight after "state".
+
+**Worked example: `processText("The cat sat on the mat.", "doc-1")`**
+
+| Word from split | Lowercased | `position` | Stop word? | Token added |
+|-----------------|------------|------------|------------|-------------|
+| `The`           | `the`      | 0          | yes        | –           |
+| `cat`           | `cat`      | 1          | no         | `cat@1`     |
+| `sat`           | `sat`      | 2          | no         | `sat@2`     |
+| `on`            | `on`       | 3          | yes        | –           |
+| `the`           | `the`      | 4          | yes        | –           |
+| `mat`           | `mat`      | 5          | no         | `mat@5`     |
+
+The `.` after "mat" is a separator, so it disappears. Java also drops trailing empty strings, so nothing extra appears at the end.
+
+Result: `[Token("cat","doc-1",1), Token("sat","doc-1",2), Token("mat","doc-1",5)]`
 
 ```mermaid
 flowchart TD
-    A["processText(text, docId)"] --> B{"text null or blank?"}
-    B -- yes --> Z["return empty list"]
-    B -- no --> C["split on non-letter/digit"]
-    C --> D["for each word, i = 0..n"]
-    D --> E["lowercase"]
-    E --> F{"stop word?"}
-    F -- yes --> D
-    F -- no --> G["optional: stem"]
-    G --> H["add Token(value, docId, i)"]
-    H --> D
-    D -- done --> I["return tokens"]
+    A["processText(text, documentID)"] --> B{"text is null or blank?"}
+    B -- yes --> R0["return empty list"]
+    B -- no --> C["words = split text on non-letters/digits"]
+    C --> D["tokens = empty list<br/>position = 0"]
+    D --> E{"more words left?"}
+    E -- no --> R["return tokens"]
+    E -- yes --> F["take next word"]
+    F --> G{"word is empty?"}
+    G -- "yes: skip, don't count" --> E
+    G -- no --> H["word = lowercase(word)"]
+    H --> I{"word is a stop word?"}
+    I -- no --> J["optional: stem word"]
+    J --> K["add Token(word, documentID, position)"]
+    K --> L["position = position + 1"]
+    I -- yes --> L
+    L --> E
 ```
 
 **Tests first**
 
 - `"The cat sat on the mat"` gives `cat@1, sat@2, mat@5`.
 - Punctuation and mixed case: `"Hello, WORLD!"` gives `hello@0, world@1`.
+- Leading punctuation doesn't shift positions: `", hello world"` gives `hello@0, world@1`.
 - Null, empty and whitespace-only text give an empty list.
-- Numbers are kept: `"CSC322 project"` gives `csc322, project`.
+- Numbers are kept: `"CSC322 project"` gives `csc322@0, project@1`.
 - A string made only of stop words gives an empty list.
+- Every token carries the `documentID` that was passed in.
 
 **Done when:** tests pass and the stop-word list is loaded from the resource file.
+
+#### Implementation notes
+
+**Who did what:** you wrote `TextProcessor` and `stopwords.txt`. Claude reviewed it, added Javadoc and wrote the tests.
+
+**How it works:** `indexing/TextProcessor.java` follows the steps and flowchart above.
+
+- **Constructor:** reads `static/stopwords.txt` from the classpath once and keeps the words in a `Set`.
+- **`processText`:**
+  - Returns an empty list for null or empty text.
+  - Splits the text with a precompiled `Pattern` (`[^\p{L}\p{N}]+`).
+  - Skips empty pieces, and lowercases each word with `Locale.ROOT`.
+  - Adds a `Token` for each word that isn't a stop word.
+  - Increases `position` for **every** word, stop words included.
+
+**Decisions**
+
+- **Stop words live in `static/`** so the list is public at `http://localhost:8080/stopwords.txt`. A test makes sure it stays reachable.
+- **The regex is compiled once** as a constant (`WORD_SEPARATOR`). `String.split` would recompile it on every call, and queries have a 0.01 s target.
+- **`Locale.ROOT` for lowercasing.** Plain `toLowerCase()` depends on the machine's language setting (for example, Turkish turns `I` into `ı`), which would make document and query terms stop matching.
+- **A null `documentID` is allowed,** so the query parser (T7) can use the same method for queries.
+
+**Bugs found in review and fixed**
+
+1. `position++` was inside the stop-word `if`, so stop words didn't count. "state of the art" gave `art@1` instead of `art@3`.
+2. `text.isEmpty()` ran before the null check, so `null` threw `NullPointerException`.
+
+**Tests (all 53 in the project pass)**
+
+| Test class                 | Tests | Checks                                                                                          |
+|----------------------------|-------|-------------------------------------------------------------------------------------------------|
+| `TextProcessorTest`        | 13    | Positions with stop words, punctuation, capitals, leading punctuation, numbers, accented letters, null/blank text, text made only of stop words, `documentID` copied onto tokens (including null) |
+| `StopWordsFileServedTests` | 1     | `GET /stopwords.txt` returns 200 and contains the stop words                                     |
 
 ---
 
