@@ -112,6 +112,7 @@ The current diagram is a good base. These gaps show up once the full requirement
 4. **`Query` becomes a tree (AST)** instead of parallel `terms` / `operators` lists. The diagram's own notes predict this once an ANTLR grammar is used.
 5. **`RankingAlgorithm` becomes an interface (Strategy)** with `TfIdfRanking` as the first implementation, so BM25 can be added without touching callers.
 6. **`Indexer` also updates the `Trie`.** The diagram says the trie is "populated incrementally as the Indexer processes documents", but draws no arrow between them.
+7. **`InvertedIndex` stores `Map<String, Map<String, Posting>>`** (term → documentID → Posting) instead of `Map<String, List<Posting>>`. Updating or deleting a document becomes a direct lookup instead of a list scan, and a document can't appear twice under the same term. `getPostings(term)` still returns that term's postings.
 
 Design patterns used overall: **Facade** (SearchEngineAPI), **Strategy** (extractors, ranking), **Factory** (ExtractorFactory), **Composite + Interpreter** (query AST evaluated by MatchingEngine), **Visitor** (ANTLR parse tree → AST).
 
@@ -124,10 +125,10 @@ Design patterns used overall: **Facade** (SearchEngineAPI), **Strategy** (extrac
 | T0  | Project setup and dependencies        | –              | Claude               | Done        |
 | T1  | Core ADTs                             | T0             | You + Claude         | Done        |
 | T2  | TextProcessor                         | T1             | You                  | Done        |
-| T3  | InvertedIndex and DocumentStore       | T1             | You                  | Not started |
+| T3  | InvertedIndex and DocumentStore       | T1             | You                  | Done        |
 | T4  | Indexer                               | T2, T3, T6     | You                  | Not started |
 | T5  | Text extraction (Strategy + Factory)  | T1             | Claude (needs OK)    | Not started |
-| T6  | Trie (autocomplete)                   | –              | You                  | Not started |
+| T6  | Trie (autocomplete)                   | –              | You                  | Done        |
 | T7  | Query grammar and parser (ANTLR)      | T2             | You                  | Not started |
 | T8  | MatchingEngine                        | T3, T7         | You                  | Not started |
 | T9  | RankingAlgorithm (TF-IDF) and snippets | T3, T7        | You                  | Not started |
@@ -435,7 +436,7 @@ flowchart TD
 
 ### T3 — InvertedIndex and DocumentStore
 
-**Owner:** You · **Status:** Not started
+**Owner:** You · **Status:** Done
 
 **Goal:** Build the storage ADTs. Term lookup must be about O(1), because the 0.01 s target depends on it.
 
@@ -443,21 +444,31 @@ flowchart TD
 
 **InvertedIndex**
 
-- Internal data: `Map<String, Map<String, Posting>>`, meaning term → (documentId → Posting). The inner map makes replacing and removing a document cheap.
-- Operations:
-  - `addPosting(term, posting)`
-  - `getPostings(term)`: returns an unmodifiable collection, **never null**, and empty when the term is unknown.
-  - `removeDocument(documentId)`
-  - `documentFrequency(term)`
-  - `documentCount()`
-  - `documentLength(documentId)`
-  - `allDocumentIds()`: needed for `NOT` queries.
-- For removal, keep a reverse map `documentId → Set<term>` so you don't scan every term.
-- Concurrency: indexing runs on a background thread while searches read. Use `ConcurrentHashMap`, or guard writes with a `ReentrantReadWriteLock`, and write down which you chose and why.
+- **Internal data:** `Map<String, Map<String, Posting>>`, meaning term → (documentID → Posting):
+  ```
+  "search" → { "doc-1": Posting(doc-1, 2, [0, 7]), "doc-4": Posting(doc-4, 1, [3]) }
+  ```
+  - **Why not `Map<String, List<Posting>>` like the class diagram?** Documents get modified and deleted (T11). With an inner map:
+    - removing or replacing one document's posting is a direct delete or put by key, not a scan through a list;
+    - adding the same document twice replaces its posting instead of creating a duplicate.
+  - The documentID is stored both as the key and inside `Posting`. That's intentional, because `getPostings` returns postings on their own and the ranker needs to know which document each one belongs to.
+- **Reverse map:** `Map<String, Set<String>>`, documentID → the terms in that document, so `removeDocument` only visits that document's terms instead of every term in the index.
+- **Operations:**
+  - `addPosting(term, posting)`: stores the posting under `term` and `posting.documentID()`, records the term in the reverse map, and updates the document's length.
+  - `getPostings(term)`: returns that term's postings as an unmodifiable `Collection<Posting>`. `Collections.unmodifiableCollection(inner.values())` avoids copying. **Never null**; empty when the term is unknown.
+  - `removeDocument(documentID)`: for each of the document's terms (from the reverse map), remove the document from that term's inner map, and delete the term if its map is now empty. Then remove the document from the reverse map and the lengths.
+  - `documentFrequency(term)`: the size of the term's inner map, or 0 if the term is unknown.
+  - `documentCount()`: the number of indexed documents.
+  - `documentLength(documentID)`: the sum of that document's posting frequencies, which is its number of non-stop-word tokens. 0 if the document is unknown.
+  - `allDocumentIds()`: every indexed document id; needed for `NOT` queries.
+- **Concurrency:**
+  - Use `ConcurrentHashMap` for the outer map, every inner map and the reverse map. Searches can then read while the indexer writes, with no locks and no copying.
+  - Create a term's inner map with `computeIfAbsent`.
+  - Make `addPosting` and `removeDocument` `synchronized`. Otherwise `removeDocument` could delete an empty term map at the same moment `addPosting` puts a posting into it, and that posting would be lost. Reads stay unsynchronized, so searches never wait.
 
 **DocumentStore**
 
-- `save(doc)`, `get(id)` returning `Optional<Document>`, `remove(id)`, `contains(id)`, `size()`.
+- `save(doc)`, `get(id)` returning `Optional<Document>`, `getDocs()` returning a copy of all documents, `remove(id)`, `contains(id)` and `size()`.
 
 ```mermaid
 flowchart TD
@@ -489,6 +500,50 @@ flowchart TD
 - The returned collection cannot be modified by the caller.
 
 **Done when:** both ADTs pass their tests, and the concurrency choice is recorded in the implementation notes.
+
+#### Implementation notes
+
+**Who did what**
+
+- `InvertedIndex`: you chose the term → documentID → Posting structure. Claude wrote the class, at your request, so you could study how it works.
+- `DocumentStore`: you wrote it. Claude added Javadoc, fixed a few small issues (listed below) and wrote the tests.
+
+**InvertedIndex** (`indexing/InvertedIndex.java`) keeps three maps:
+
+| Map               | Shape                          | Purpose                                                           |
+|-------------------|--------------------------------|-------------------------------------------------------------------|
+| `postings`        | term → (documentID → Posting)  | The index itself                                                  |
+| `termsByDocument` | documentID → set of terms      | `removeDocument` visits only that document's terms                |
+| `documentLengths` | documentID → token count       | Document length for ranking (T9); the sum of its posting frequencies |
+
+- `addPosting` does three things:
+  - stores the posting, creating the term's inner map with `computeIfAbsent`;
+  - records the term under the document in `termsByDocument`;
+  - updates the length with `merge`. When a posting is replaced, its old frequency is subtracted first.
+- `getPostings` returns a read-only view instead of a copy, so queries don't pay for copying. It never returns null.
+- `removeDocument` removes the document from each of its terms and deletes terms left with no documents.
+
+**Concurrency decision**
+
+- **Every map is a `ConcurrentHashMap`, in both classes.** A search can loop over postings while the indexer changes them.
+  - With a plain `HashMap`, this throws `ConcurrentModificationException`. That was checked in jshell, and `postingsCanBeReadWhileADocumentIsBeingRemoved` tests it.
+  - With `ConcurrentHashMap`, reads never lock.
+- **`addPosting` and `removeDocument` are `synchronized`.** Each one makes several map calls. Without the lock, a remove could delete a term's empty inner map at the same moment an add is putting a posting into it, and that posting would be lost. Only these two write methods lock, so searches never wait.
+- A `ReentrantReadWriteLock` was not used: reads would then have to take a lock too, for no benefit.
+
+**DocumentStore** (`indexing/DocumentStore.java`) is a `ConcurrentHashMap` of document id → `Document`. It is kept separate from the index, so showing a result never re-opens the original file.
+
+Fixed in review:
+1. `get` used `Optional.of(documents.get(id))`. That throws `NullPointerException` for an unknown id, because `Optional.of(null)` throws. It now uses `Optional.ofNullable`.
+2. `contains` returned `Boolean`. It now returns the primitive `boolean`.
+3. `remove` said "document is null" when the id was null. `get` and `contains` now also reject a null id with a clear message.
+
+**Tests (79 in the project, all passing)**
+
+| Test class          | Tests | Checks                                                                                           |
+|---------------------|-------|--------------------------------------------------------------------------------------------------|
+| `InvertedIndexTest` | 16    | Add/get, several documents per term, replace instead of duplicate, removal and cleanup of empty terms, document frequency/count/length (including after a replace or remove), read-only results, reading during removal, invalid arguments |
+| `DocumentStoreTest` | 10    | Save/get, empty `Optional` for an unknown id, replace by id, remove, `contains`, `size`, `getDocs` returns a copy, null arguments |
 
 ---
 
@@ -582,42 +637,175 @@ flowchart TD
 
 ### T6 — Trie (autocomplete)
 
-**Owner:** You · **Status:** Not started
+**Owner:** You · **Status:** Done
 
 **Goal:** Return suggestions for a prefix quickly (R3).
 
 **Description**
 
-- `TrieNode { Map<Character, TrieNode> children; boolean isWord; int weight; }`
-- `insert(word)`: walk or create nodes, then mark the last node as a word and increment its `weight`. Weight counts how many documents contain the word, so common terms rank first.
-- `getSuggestions(prefix, limit)`:
-  1. Lowercase the prefix.
-  2. Walk to the prefix node. If it is missing, return an empty list.
-  3. Collect every word below it with a depth-first search.
-  4. Sort by weight, highest first, then alphabetically.
-  5. Return the top `limit`.
-- For multi-word input like `"machine lea"`, the API (T10) completes only the last word and keeps the rest.
+A trie (prefix tree) stores words one letter per node. Words that start the same way share the same path, so every word beginning with a prefix sits under that prefix's node.
+
+**Files:** `autocomplete/Trie.java` (with `TrieNode` as a private nested class, since nothing else uses it) and the test `autocomplete/TrieTest.java`.
+
+**Example:** the trie after indexing, where `java` is in 3 documents, `javascript` in 2 and `jar` in 1:
+
+```
+(root)
+ └─ j
+    └─ a
+       ├─ r                          ← "jar"         word, weight 1
+       └─ v
+          └─ a                       ← "java"        word, weight 3
+             └─ s─c─r─i─p─t          ← "javascript"  word, weight 2
+```
+
+- `getSuggestions("jav", 10)` walks `j → a → v`, collects every word below that node (`java`, `javascript`) and returns `[java, javascript]`, highest weight first.
+- `getSuggestions("ja", 10)` returns `[java, javascript, jar]`.
+
+**`TrieNode`**
+
+- `Map<Character, TrieNode> children`: the next letters.
+- `boolean isWord`: true if a word ends at this node.
+- `int weight`: how many documents contain the word ending here. Common words are suggested first.
+
+**Weight = document count.** The Indexer (T4) calls `insert(term)` **once per unique term per document**, not once per occurrence. When a document is removed, it calls `remove(term)` once for each of that document's terms. That keeps each weight equal to the number of documents containing the word, the same as `InvertedIndex.documentFrequency`.
+
+**`insert(word)`**
+
+1. Reject a null or blank word.
+2. Start at the root.
+3. For each letter, move to that child, creating it if it doesn't exist.
+4. At the last letter's node, set `isWord = true` and add 1 to `weight`.
+
+**`remove(word)`**
+
+1. Walk to the word's last node, letter by letter. If any letter is missing, or the node isn't a word, do nothing.
+2. Subtract 1 from `weight`.
+3. If `weight` is now 0, set `isWord = false`, so the word is no longer suggested.
+   - Longer words below it, such as `javascript` under `java`, are not affected.
+   - *(Optional)* Delete nodes left with no children that aren't words, to save memory.
+
+**`getSuggestions(prefix, limit)`**
+
+1. If `prefix` is null or blank, return an empty list. (Decision: suggesting the whole vocabulary for an empty box is useless and slow.)
+2. If `limit < 1`, throw `IllegalArgumentException`.
+3. Lowercase the prefix with `Locale.ROOT`. Indexed terms are already lowercase, but user input may not be.
+4. Walk from the root, one letter at a time. If a letter is missing, return an empty list.
+5. From the prefix's node, collect every word below it with a depth-first search (DFS), building each word letter by letter. The prefix itself counts if it is a word.
+6. Sort by weight, highest first; break ties alphabetically.
+7. Return the first `limit` words.
+
+**Other points**
+
+- **Multi-word input** such as `"machine lea"`: the API (T10) completes only the last word and keeps the rest. The trie only ever sees single words.
+- **Thread safety:** autocomplete reads the trie while the indexer writes. Use the same approach as `InvertedIndex`:
+  - `children` is a `ConcurrentHashMap`;
+  - `insert` and `remove` are `synchronized`; `getSuggestions` is not;
+  - mark `isWord` and `weight` as `volatile`, so a read sees the latest write.
 - *(Optional, for speed)* Store the top-N suggestions on each node while inserting, so a lookup doesn't have to search the whole subtree.
 
 ```mermaid
 flowchart TD
-    A["getSuggestions(prefix, limit)"] --> B["lowercase prefix"]
-    B --> C["walk nodes char by char"]
-    C --> D{"node found?"}
-    D -- no --> E["return empty list"]
-    D -- yes --> F["DFS: collect words below node"]
-    F --> G["sort by weight desc, then alphabetical"]
-    G --> H["return first limit words"]
+    subgraph insert
+        I1["insert(word)"] --> I2{"word null or blank?"}
+        I2 -- yes --> I3["throw"]
+        I2 -- no --> I4["node = root"]
+        I4 --> I5{"more letters?"}
+        I5 -- yes --> I6["node = child for letter<br/>(create it if missing)"]
+        I6 --> I5
+        I5 -- no --> I7["node.isWord = true<br/>node.weight = node.weight + 1"]
+    end
+    subgraph remove
+        R1["remove(word)"] --> R2["walk to word's last node"]
+        R2 --> R3{"found and isWord?"}
+        R3 -- no --> R4["do nothing"]
+        R3 -- yes --> R5["node.weight = node.weight - 1"]
+        R5 --> R6{"weight == 0?"}
+        R6 -- yes --> R7["node.isWord = false"]
+        R6 -- no --> R8["done"]
+    end
+    subgraph getSuggestions
+        S1["getSuggestions(prefix, limit)"] --> S2{"prefix null or blank?"}
+        S2 -- yes --> S3["return empty list"]
+        S2 -- no --> S4["lowercase prefix"]
+        S4 --> S5["walk to prefix's node"]
+        S5 --> S6{"found?"}
+        S6 -- no --> S3
+        S6 -- yes --> S7["DFS: collect every word below the node"]
+        S7 --> S8["sort: weight high to low, then A to Z"]
+        S8 --> S9["return first limit words"]
+    end
 ```
 
 **Tests first**
 
-- After inserting `java`, `javascript`, `jar`, the prefix `ja` returns all three, and `jav` returns two.
-- An unknown prefix returns an empty list. An empty prefix returns an empty list, or the top words; pick one and document it.
-- A word inserted more often ranks first.
-- `limit` is respected.
+- After inserting `java` ×3, `javascript` ×2 and `jar` ×1:
+  - the prefix `ja` returns `[java, javascript, jar]`;
+  - the prefix `jav` returns `[java, javascript]`.
+- The prefix itself is suggested when it is a word: `java` returns `[java, javascript]`.
+- An uppercase prefix works: `JA` gives the same result as `ja`.
+- An unknown prefix returns an empty list.
+- A null, empty or blank prefix returns an empty list.
+- Words with equal weight are sorted alphabetically.
+- `limit` is respected, and `limit < 1` throws.
+- `remove` lowers the weight. The word is still suggested while its weight is above 0, and disappears at 0.
+- Removing `java` does not remove `javascript`.
+- Removing a word that was never inserted does nothing.
+- `insert` rejects a null or blank word.
 
 **Done when:** tests pass.
+
+#### Implementation notes
+
+**Who did what**
+
+- You wrote the first version: the `Trie` class, the nested `TrieNode`, `insert`, and an attempt at `getSuggestion`.
+- Claude reviewed it, then finished it at your request so you could study the result: `getSuggestions`, `remove`, weights, thread safety, Javadoc and tests.
+
+**Problems found in review.** Before the fix, with `java`, `javascript` and `jar` inserted:
+
+| Call                   | Before                  | After                        |
+|------------------------|-------------------------|------------------------------|
+| `getSuggestion("ja")`  | `[]`                    | `[java, javascript, jar]`    |
+| `getSuggestion("java")`| `[]`                    | `[java, javascript]`         |
+| `getSuggestion("JA")`  | `NullPointerException`  | `[java, javascript, jar]`    |
+| `getSuggestion("jxy")` | `NullPointerException`  | `[]`                         |
+
+1. **Walking and collecting were mixed in one loop.** The loop stopped at the end of the prefix, so no word longer than the prefix was ever found.
+2. **`isWord` was checked before moving to the next letter,** so the prefix's own last node was never checked.
+3. **A missing letter set `node` to `null`,** and the next iteration crashed.
+4. **A new `StringBuilder` was created on every iteration,** and it only appended a letter when the letter was *missing*.
+5. **`toLowerCase` only affected the loop condition;** `charAt` still read the original prefix.
+6. **`limit` was checked but never applied.** `remove` was an empty stub.
+
+**How it works now**
+
+- **`insert`:** lowercases the word, then walks down with `computeIfAbsent` (which creates missing nodes), marks the last node as a word and adds 1 to its `weight`.
+- **`getSuggestions`** does two separate jobs:
+  - **Job 1:** walk down to the prefix's last node, and return an empty list as soon as a letter is missing.
+  - **Job 2:** `collect` does a depth-first search from that node. It appends a letter before visiting a child and removes it afterwards, so every child starts from the same letters. The results are then sorted by weight (highest first), ties go A to Z, and the list is cut to `limit`.
+- **`remove`:** walks to the word and subtracts 1 from its weight; at 0 it clears `isWord`. Longer words below it (`javascript` under `java`) are untouched. Empty branches are not pruned; they only cost a little memory.
+
+**Decisions**
+
+- **`weight` = number of documents containing the word.** The Indexer (T4) must call `insert` once per unique term per document, and `remove` once per term when a document is removed.
+- **`ConcurrentHashMap` for children** (your choice). Letter order in the map doesn't matter, because ties are sorted explicitly.
+- **`insert` and `remove` are `synchronized`,** and `isWord`/`weight` are `volatile`. This is the same approach as `InvertedIndex`: reads never wait.
+- **A null or blank prefix gives an empty list.** A `limit` below 1 throws.
+
+**Tests:** `TrieTest`, 15 tests.
+
+- ordering by weight
+- a narrower prefix narrows the results
+- the prefix itself as a word
+- case-insensitive prefix and lowercased storage
+- unknown and blank prefixes
+- ties sorted alphabetically
+- the limit, and a limit below 1
+- remove: lowering the weight, disappearing at 0, keeping longer words, words that were never inserted
+- invalid words
+
+The project has 94 tests, all passing.
 
 ---
 
