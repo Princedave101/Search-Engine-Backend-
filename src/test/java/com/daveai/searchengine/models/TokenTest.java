@@ -14,7 +14,7 @@ class TokenTest {
 
         assertThat(token.value()).isEqualTo("search");
         assertThat(token.documentID()).isEqualTo("doc-1");
-        assertThat(token.positions()).isEqualTo(4);
+        assertThat(token.position()).isEqualTo(4);
     }
 
     @Test

@@ -88,16 +88,20 @@ public class InvertedIndex {
     /**
      * Removes a document from every term it appears under. Terms left with no documents are
      * deleted. Does nothing if the document is not indexed.
+     * <p>
+     * The removed terms are returned so the Indexer (T4) can also remove them from the trie;
+     * only the index knows which terms a document contained.
      *
      * @param documentID the document to remove; not null
+     * @return the terms the document contained; empty if the document was not indexed
      */
-    public synchronized void removeDocument(String documentID) {
+    public synchronized Set<String> removeDocument(String documentID) {
         Objects.requireNonNull(documentID, "documentID must not be null");
 
         // The reverse map says exactly which terms to visit. Without it, every term in the index would be scanned.
         Set<String> terms = termsByDocument.remove(documentID);
         if (terms == null) {
-            return;
+            return Set.of();
         }
         for (String term : terms) {
             Map<String, Posting> postingByDocument = postings.get(term);
@@ -107,6 +111,7 @@ public class InvertedIndex {
             }
         }
         documentLengths.remove(documentID);
+        return Collections.unmodifiableSet(terms);
     }
 
     /**

@@ -167,6 +167,20 @@ class InvertedIndexTest {
     }
 
     @Test
+    void removeDocumentReturnsTheTermsTheDocumentContained() {
+        index.addPosting("search", posting("doc-1", 0));
+        index.addPosting("engine", posting("doc-1", 1));
+        index.addPosting("search", posting("doc-2", 0));
+
+        assertThat(index.removeDocument("doc-1")).containsExactlyInAnyOrder("search", "engine");
+    }
+
+    @Test
+    void removeDocumentReturnsEmptySetForUnknownDocument() {
+        assertThat(index.removeDocument("never-indexed")).isEmpty();
+    }
+
+    @Test
     void rejectsInvalidArguments() {
         assertThatThrownBy(() -> index.addPosting(null, posting("doc-1", 0)))
                 .isInstanceOf(NullPointerException.class);

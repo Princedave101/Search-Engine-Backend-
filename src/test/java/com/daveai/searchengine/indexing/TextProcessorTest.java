@@ -17,7 +17,7 @@ class TextProcessorTest {
         List<Token> tokens = processor.processText("The cat sat on the mat", "doc-1");
 
         assertThat(tokens)
-                .extracting(Token::value, Token::positions)
+                .extracting(Token::value, Token::position)
                 .containsExactly(tuple("cat", 1), tuple("sat", 2), tuple("mat", 5));
     }
 
@@ -27,7 +27,7 @@ class TextProcessorTest {
         List<Token> tokens = processor.processText("state of the art", "doc-1");
 
         assertThat(tokens)
-                .extracting(Token::value, Token::positions)
+                .extracting(Token::value, Token::position)
                 .containsExactly(tuple("state", 0), tuple("art", 3));
     }
 
@@ -36,7 +36,7 @@ class TextProcessorTest {
         List<Token> tokens = processor.processText("Hello, WORLD!", "doc-1");
 
         assertThat(tokens)
-                .extracting(Token::value, Token::positions)
+                .extracting(Token::value, Token::position)
                 .containsExactly(tuple("hello", 0), tuple("world", 1));
     }
 
@@ -45,7 +45,7 @@ class TextProcessorTest {
         List<Token> tokens = processor.processText("THE Cat", "doc-1");
 
         assertThat(tokens)
-                .extracting(Token::value, Token::positions)
+                .extracting(Token::value, Token::position)
                 .containsExactly(tuple("cat", 1));
     }
 
@@ -54,7 +54,7 @@ class TextProcessorTest {
         List<Token> tokens = processor.processText(", hello world", "doc-1");
 
         assertThat(tokens)
-                .extracting(Token::value, Token::positions)
+                .extracting(Token::value, Token::position)
                 .containsExactly(tuple("hello", 0), tuple("world", 1));
     }
 
@@ -63,7 +63,7 @@ class TextProcessorTest {
         List<Token> tokens = processor.processText("cat---dog\n\t bird...", "doc-1");
 
         assertThat(tokens)
-                .extracting(Token::value, Token::positions)
+                .extracting(Token::value, Token::position)
                 .containsExactly(tuple("cat", 0), tuple("dog", 1), tuple("bird", 2));
     }
 
@@ -72,7 +72,7 @@ class TextProcessorTest {
         List<Token> tokens = processor.processText("CSC322 project 2024", "doc-1");
 
         assertThat(tokens)
-                .extracting(Token::value, Token::positions)
+                .extracting(Token::value, Token::position)
                 .containsExactly(tuple("csc322", 0), tuple("project", 1), tuple("2024", 2));
     }
 
