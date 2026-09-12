@@ -127,7 +127,7 @@ Design patterns used overall: **Facade** (SearchEngineAPI), **Strategy** (extrac
 | T2  | TextProcessor                         | T1             | You                  | Done        |
 | T3  | InvertedIndex and DocumentStore       | T1             | You                  | Done        |
 | T4  | Indexer                               | T2, T3, T6     | You                  | Done        |
-| T5  | Text extraction (Strategy + Factory)  | T1             | Claude (needs OK)    | Not started |
+| T5  | Text extraction (Strategy + Factory)  | T1             | Claude               | Done        |
 | T6  | Trie (autocomplete)                   | –              | You                  | Done        |
 | T7  | Query grammar and parser (ANTLR)      | T2             | You                  | Not started |
 | T8  | MatchingEngine                        | T3, T7         | You                  | Not started |
@@ -697,7 +697,7 @@ The project has 108 tests, all passing.
 
 ### T5 — Text extraction (Strategy + Factory)
 
-**Owner:** Claude (needs OK) · **Status:** Not started
+**Owner:** Claude · **Status:** Done
 
 **Goal:** Turn a file of any supported format into a `Document`, without the Indexer knowing about formats.
 
@@ -727,7 +727,7 @@ flowchart TD
     C -- no --> D["throw UnsupportedDocumentTypeException"]
     C -- yes --> E["extractor.extract(path)"]
     E --> F["text + metadata title"]
-    F --> G["new Document(id, title, text, path)"]
+    F --> G["new Document(id, title, text)"]
 ```
 
 **Tests first**
@@ -737,6 +737,67 @@ flowchart TD
 - A file without a metadata title falls back to its file name.
 
 **Done when:** every format in R1 has a passing extraction test.
+
+#### Implementation notes
+
+**Classes** (`extraction/`)
+
+| Class | Role |
+|-------|------|
+| `TextExtractor` | Strategy interface: `supportedExtensions()` and `extract(Path)` returning `ExtractedContent(text, title)` |
+| `TikaTextExtractor` | Abstract base class. Holds a map of extension → Tika `Parser` and runs the parse with `TikaInputStream` + `BodyContentHandler(-1)`. |
+| `PlainTextExtractor` | txt → `TXTParser` |
+| `PdfExtractor` | pdf → `PDFParser` |
+| `WordExtractor` | doc → `OfficeParser`, docx → `OOXMLParser` |
+| `PowerPointExtractor` | ppt, pps → `OfficeParser`; pptx, ppsx → `OOXMLParser` |
+| `ExcelExtractor` | xls → `OfficeParser`, xlsx → `OOXMLParser` |
+| `HtmlExtractor` | html, htm → `JSoupParser` |
+| `XmlExtractor` | xml → `XMLParser` |
+| `ExtractorFactory` | Factory: extension → extractor. Also `isSupported(path)` for the T11 scanner, and `withDefaultExtractors()`. |
+| `DocumentLoader` | File → `Document(id, title, text)` |
+| `UnsupportedDocumentTypeException`, `DocumentExtractionException` | Unchecked exceptions: unknown file type, and missing or corrupt file |
+
+```mermaid
+flowchart LR
+    F["reports/annual.docx"] --> DL["DocumentLoader.load"]
+    DL --> EF["ExtractorFactory.forFile"]
+    EF -- ".docx" --> WE["WordExtractor"]
+    WE --> TB["TikaTextExtractor.extract<br/>(OOXMLParser)"]
+    TB --> EC["ExtractedContent(text, title)"]
+    EC --> DL
+    DL --> D["Document('reports/annual.docx',<br/>'Annual Research Report', text)"]
+```
+
+**Decisions**
+
+- **One extractor per format family, each using the specific Tika parser.**
+  - `AutoDetectParser` for everything would also work, but it would hide the Strategy pattern and accept formats we don't claim to support.
+  - Parsers are stateless, so one instance per extractor is safe to share between threads.
+- **Tika 4.0 API differences:**
+  - `Parser.parse` now takes a `TikaInputStream` (not a plain `InputStream`).
+  - The HTML parser is `JSoupParser`; `HtmlParser` no longer exists.
+  - Both were checked against the real jars with jshell reflection.
+- **No text length limit** (`BodyContentHandler(-1)`). Tika's default cuts off at 100,000 characters, which would silently leave the end of long documents unindexed.
+- **Document id** is the path relative to the repository folder, with forward slashes (for example `reports/2024/annual.docx`).
+  - It looks the same on Windows and Linux, can be used in URLs (T10), and leads straight back to the original file.
+  - Files outside the repository are rejected.
+- **Title** is the metadata title if there is one (HTML `<title>`, Word Title property), otherwise the file name without its extension.
+- **"ppts" in the brief** is read as the PowerPoint slide-show formats, pps and ppsx.
+- **The temporary `TikaDependencyTest` from T0 was removed.** These tests replace it.
+
+**Sample files** (`src/test/resources/samples/`)
+
+- There are 12 files, one per extension. Each contains "This is the {FORMAT} sample about the inverted index."
+- Microsoft Office created the Office and PDF samples (Word, Excel and PowerPoint through PowerShell COM, with the PDF saved from Word), so the tests read real files rather than hand-made imitations.
+- `sample.docx` has the Title property "Annual Research Report", and `sample.html` has `<title>HTML Sample Title</title>`.
+
+**Tests (33 new; 138 in the project, all passing)**
+
+| Test class | Tests | Checks |
+|------------|-------|--------|
+| `TextExtractorsTest` | 19 | The sample sentence from each of the 12 formats (parameterized); HTML and Word titles; XML tags excluded; each extractor's extensions; wrong format, missing file and corrupt file |
+| `ExtractorFactoryTest` | 7 | All 13 extensions supported; picks by extension; case-insensitive matching; unsupported extension and no extension; `isSupported`; two extractors claiming the same extension |
+| `DocumentLoaderTest` | 7 | Relative id with forward slashes; metadata title; file-name title fallback; extracted text; file outside the repository; unsupported type; **end to end**: all 12 samples loaded and indexed, with "inverted" found in 12 documents |
 
 ---
 
@@ -918,58 +979,154 @@ The project has 94 tests, all passing.
 
 **Owner:** You · **Status:** Not started
 
-**Goal:** Parse raw query text into a tree that captures what the query means (R6, and the parser-generator requirement).
+**Goal:** Parse raw query text into a tree that captures what the query means. This covers R6 and the brief's parser-generator requirement.
 
-**Description**
+**Files**
 
-1. **Grammar** in `src/main/antlr4/com/daveai/searchengine/query/Query.g4`. Starting sketch:
-   ```antlr
-   grammar Query;
+| File | What it is |
+|------|------------|
+| `src/main/antlr4/com/daveai/searchengine/query/SearchQuery.g4` | The grammar. You write it. |
+| `query/ast/QueryNode.java` and 5 node records | The AST: the tree of meaning |
+| `query/Query.java` | The parsed query: raw text plus the AST root |
+| `query/QueryAstBuilder.java` | The visitor that turns ANTLR's parse tree into the AST |
+| `query/QueryParser.java` | The class the rest of the app calls: `parse(raw)` |
+| `test/.../query/QueryParserTest.java` | Tests |
 
-   query   : orExpr? EOF ;
-   orExpr  : andExpr (OR andExpr)* ;
-   andExpr : notExpr (AND? notExpr)* ;      // "cat dog" means cat AND dog
-   notExpr : NOT notExpr | primary ;
-   primary : LPAREN orExpr RPAREN | PHRASE | TERM ;
+- **Generated classes:** during `mvn compile`, ANTLR generates `SearchQueryLexer`, `SearchQueryParser` and `SearchQueryBaseVisitor` into `target/generated-sources/antlr4/`.
+  - The folder under `src/main/antlr4/` becomes their package (`com.daveai.searchengine.query`).
+  - Never edit or commit the generated files; they are rebuilt on every compile.
+- ⚠ **Name the grammar `SearchQuery`, not `Query`.** ANTLR names the generated parser `<grammar name>Parser`. `grammar Query` would therefore generate a class called `QueryParser`, clashing with your own `QueryParser`.
 
-   OR     : 'OR' | '|' ;
-   AND    : 'AND' | '&' ;
-   NOT    : 'NOT' | '-' ;
-   LPAREN : '(' ;
-   RPAREN : ')' ;
-   PHRASE : '"' ~["]* '"' ;
-   TERM   : [\p{L}\p{N}]+ ;
-   WS     : [ \t\r\n]+ -> skip ;
-   ```
-   Precedence comes from how the rules nest: NOT binds tightest, then AND, then OR. Operators are uppercase only, so a lowercase "or" is just a word, and a stop word.
-2. **AST:** `sealed interface QueryNode permits TermNode, PhraseNode, AndNode, OrNode, NotNode`. Also `record Query(String rawText, QueryNode root)` with a helper `terms()` that the ranker uses.
-3. **Visitor:** `QueryAstBuilder extends QueryBaseVisitor<QueryNode>` turns the ANTLR parse tree into the AST. It runs every term through `TextProcessor`. Terms that are stop words are dropped, and an AND/OR left with one child collapses to that child.
-4. **Errors:** users type messy queries. On a syntax error, such as `(cat` with no closing bracket, fall back to treating every word as an AND of terms instead of failing the request.
+**How the pieces fit**
+
+```
+java -spring "machine learning"
+   │
+   ▼  SearchQueryLexer   (generated)   tokens: TERM(java) NOT TERM(spring) PHRASE("machine learning")
+   ▼  SearchQueryParser  (generated)   parse tree, shaped exactly like the grammar rules
+   ▼  QueryAstBuilder    (you write)   walks the parse tree, cleans each word with TextProcessor
+   ▼
+Query(raw, And[ Term(java), Not(Term(spring)), Phrase[machine@0, learning@1] ])
+```
+
+- **Parse tree vs AST:**
+  - The *parse tree* mirrors the grammar: every rule, bracket and operator token.
+  - The *AST* keeps only the meaning: which words, combined how.
+  - T8 works on the AST.
+
+**Step 1: the grammar (`SearchQuery.g4`)**
+
+```antlr
+grammar SearchQuery;
+
+query   : orExpr? EOF ;
+orExpr  : andExpr (OR andExpr)* ;
+andExpr : notExpr (AND? notExpr)* ;   // two words side by side mean AND
+notExpr : NOT notExpr | primary ;
+primary : LPAREN orExpr RPAREN | PHRASE | TERM ;
+
+OR     : 'OR' | '|' ;
+AND    : 'AND' | '&' ;
+NOT    : 'NOT' | '-' ;
+LPAREN : '(' ;
+RPAREN : ')' ;
+PHRASE : '"' ~["]* '"' ;
+TERM   : [\p{L}\p{N}]+ ;
+WS     : [ \t\r\n]+ -> skip ;
+OTHER  : . -> skip ;                  // ignore any other character: ? , ! ' etc.
+```
+
+- **Rule names:** lowercase names (`query`, `orExpr`…) are *parser rules*, which combine tokens. UPPERCASE names (`OR`, `TERM`…) are *lexer rules*, which say what one token looks like.
+- **Precedence comes from nesting:** `query → orExpr → andExpr → notExpr → primary`. The deeper the rule, the tighter it binds: NOT first, then AND, then OR. So `java OR spring boot` means `java OR (spring AND boot)`, and brackets override it.
+- **Operators are uppercase only.** A lowercase `or` is an ordinary word, and also a stop word.
+- **`OTHER` must be the last rule.** When two lexer rules match text of the same length, ANTLR picks the earlier one, so `-` becomes `NOT`, not `OTHER`.
+- **Known limitation:** `e-mail` is read as `e NOT mail`. That is acceptable for this project.
+
+**Step 2: the AST (`query/ast/`)**
+
+```java
+public sealed interface QueryNode permits TermNode, PhraseNode, AndNode, OrNode, NotNode {}
+public record TermNode(String term)                implements QueryNode {}
+public record PhraseNode(List<Token> words)        implements QueryNode {}  // word + position within the phrase
+public record AndNode(List<QueryNode> children)    implements QueryNode {}
+public record OrNode(List<QueryNode> children)     implements QueryNode {}
+public record NotNode(QueryNode child)             implements QueryNode {}
+```
+
+- **`sealed`** means only these five types can be a `QueryNode`. T8 can then `switch` over them, and the compiler checks that every case is handled.
+- **`PhraseNode` keeps positions, not just words.** Stop words are removed from a phrase but still count, exactly as in documents: `"state of the art"` gives `[state@0, art@3]`. A matching document has `state@p` and `art@p+3`. With only `[state, art]` stored, T8 would look for the two words next to each other, and the phrase would never match.
+
+**`Query` (`query/Query.java`):** `record Query(String rawText, QueryNode root)`
+
+- `root` is `null` when nothing searchable is left, for example `the OR of` or an empty box. Add `boolean isEmpty()`, which returns `root == null`.
+- `List<String> terms()` returns every word from Term and Phrase nodes, **skipping anything under a NOT**. The ranker (T9) scores documents by these words, and a document shouldn't score higher for containing a word the user excluded.
+
+**Step 3: `QueryAstBuilder extends SearchQueryBaseVisitor<QueryNode>`**
+
+ANTLR generates one `visitXxx` method per parser rule. Override each one to return a `QueryNode`, or `null` when nothing is left (only stop words):
+
+| Rule      | What your `visitXxx` does |
+|-----------|---------------------------|
+| `query`   | If there is an `orExpr`, visit it; otherwise return `null`. |
+| `orExpr`  | Visit each `andExpr` and drop the `null`s. 0 left → `null`; 1 left → return that child; more → `OrNode`. |
+| `andExpr` | Same, with `notExpr` children → `AndNode`. |
+| `notExpr` | If it starts with `NOT`: visit the inner `notExpr`; `null` → `null`, otherwise `NotNode(child)`. If there is no `NOT`, visit `primary`. |
+| `primary` | **Brackets:** visit the inner `orExpr`. **TERM:** `processor.processText(text, null)`; no tokens (a stop word) → `null`, otherwise `TermNode(token.value())`. **PHRASE:** strip the quotes, then `processText`; 0 tokens → `null`, 1 → `TermNode`, more → `PhraseNode(tokens)`. |
+
+A `TERM` contains only letters and digits, so `processText` returns either 0 or 1 token for it.
+
+**Step 4: `QueryParser` (the class the app calls)**
+
+`QueryParser(TextProcessor processor)`, with `Query parse(String raw)`:
+
+1. If `raw` is null or blank, return `new Query(raw, null)`.
+2. Create `lexer = new SearchQueryLexer(CharStreams.fromString(raw))`.
+3. Create `parser = new SearchQueryParser(new CommonTokenStream(lexer))`.
+4. **Make syntax errors throw.** By default ANTLR prints the error to the console and guesses a fix. Call `parser.removeErrorListeners()` and `parser.setErrorHandler(new BailErrorStrategy())`.
+5. `try`: `root = new QueryAstBuilder(processor).visit(parser.query())`.
+6. `catch (ParseCancellationException e)`: **fall back**. Run `processor.processText(raw, null)` and turn the tokens into an `AndNode` of `TermNode`s. Zero tokens → `null`; one token → a single `TermNode`.
+7. Return `new Query(raw, root)`.
+
+**Worked examples**
+
+| Input                         | AST (root) |
+|-------------------------------|------------|
+| `java spring`                 | `And[Term(java), Term(spring)]` |
+| `java OR python`              | `Or[Term(java), Term(python)]` |
+| `java OR spring boot`         | `Or[Term(java), And[Term(spring), Term(boot)]]`, which checks precedence |
+| `(java OR python) AND spring` | `And[Or[Term(java), Term(python)], Term(spring)]` |
+| `java -spring`, `java NOT spring` | `And[Term(java), Not(Term(spring))]` |
+| `JAVA`                        | `Term(java)` |
+| `"Machine Learning"`          | `Phrase[machine@0, learning@1]` |
+| `"state of the art"`          | `Phrase[state@0, art@3]` |
+| `the AND java`                | `Term(java)` |
+| `what is java?`               | `Term(java)`: `?` is skipped, and "what" and "is" are stop words |
+| `the OR of`                   | `null`: an empty query |
+| `(java spring`                | syntax error → fallback → `And[Term(java), Term(spring)]` |
 
 ```mermaid
 flowchart TD
-    A["parse(raw)"] --> B["QueryLexer -> tokens"]
-    B --> C["QueryParser -> parse tree"]
-    C --> D{"syntax error?"}
-    D -- yes --> E["fallback: AND of plain terms"]
-    D -- no --> F["QueryAstBuilder visits tree"]
-    F --> G["normalise each term via TextProcessor"]
-    G --> H["drop stop words, collapse single-child nodes"]
-    E --> I["Query(raw, root)"]
-    H --> I
+    A["parse(raw)"] --> B{"raw null or blank?"}
+    B -- yes --> Z["return Query(raw, null)"]
+    B -- no --> C["SearchQueryLexer: text -> tokens"]
+    C --> D["SearchQueryParser: tokens -> parse tree<br/>(BailErrorStrategy: throw on error)"]
+    D --> E{"syntax error?"}
+    E -- yes --> F["fallback: processText(raw)<br/>-> AND of TermNodes"]
+    E -- no --> G["QueryAstBuilder visits the parse tree"]
+    G --> H["each TERM / PHRASE cleaned by TextProcessor<br/>stop words -> null"]
+    H --> I["drop nulls, collapse one-child AND / OR"]
+    F --> J["return Query(raw, root)"]
+    I --> J
 ```
 
 **Tests first**
 
-- `cat dog` gives `And(cat, dog)`.
-- `cat OR dog` gives `Or(cat, dog)`.
-- `a OR b c` gives `Or(a, And(b, c))`, which checks precedence.
-- `cat -dog` and `cat NOT dog` both give `And(cat, Not(dog))`.
-- `"Machine Learning"` gives `Phrase(machine, learning)`.
-- `the AND cat` gives `Term(cat)`.
-- `(cat` does not throw.
+- Every row in the worked-examples table above.
+- `terms()` skips words under NOT: `java -spring` gives `[java]`.
+- `null`, `""` and `"   "` give a query where `isEmpty()` is true.
+- `(java spring` does not throw.
 
-**Done when:** tests pass and the parser is generated by Maven during the build, not checked in.
+**Done when:** tests pass, and the parser is generated by Maven during the build rather than committed.
 
 ---
 
@@ -989,7 +1146,7 @@ Evaluate the AST recursively. This is the Interpreter pattern.
 | `AndNode(children)`  | intersection. Start from the smallest set; this matters for speed.                              |
 | `OrNode(children)`   | union                                                                                            |
 | `NotNode(child)`     | `allDocumentIds() − child`. Inside an AND, prefer `left − child`, which is cheaper.              |
-| `PhraseNode(words)`  | intersect the documents of all words, then keep only documents where the positions are consecutive |
+| `PhraseNode(words)`  | Intersect the documents of all the words. Then keep a document only if, for some position `p` of the first word, every other word `w` occurs at `p + (w.position − first.position)`. Those are the gaps stored in the phrase, and they include removed stop words (see T7). |
 
 ```mermaid
 flowchart TD
@@ -999,7 +1156,7 @@ flowchart TD
     B -- Or --> E["evaluate children, union"]
     B -- Not --> F["all ids minus evaluate(child)"]
     B -- Phrase --> G["intersect docs of all words"]
-    G --> H["for each doc: is there p with word_i at p+i for all i?"]
+    G --> H["for each doc: is there a position p of the first word<br/>where every word w is at p + (w.position - first.position)?"]
     H --> I["keep matching docs"]
 ```
 
@@ -1007,10 +1164,11 @@ flowchart TD
 
 Build a small index by hand for these.
 
-- AND, OR and NOT give the expected id sets.
-- A phrase matches `"machine learning"` but not a document containing `"learning machine"`.
+- AND, OR and NOT give the expected sets of document ids.
+- A phrase matches `"machine learning"`, but not a document containing `"learning machine"`.
+- `"state of the art"`, stored as `[state@0, art@3]`, matches a document with `state@10, art@13`, but not one with `state@10, art@11`.
 - An unknown term gives an empty set; inside an OR, the other side still returns results.
-- An empty query gives an empty set.
+- A query with a `null` root (nothing searchable) gives an empty set.
 
 **Done when:** tests pass.
 
