@@ -80,7 +80,7 @@
             <version>${tika.version}</version>
         </dependency>
 
-        <!-- Runtime for the query parser generated from Query.g4 (T7) -->
+        <!-- Runtime for the query parser generated from SearchQuery.g4 (T7) -->
         <dependency>
             <groupId>org.antlr</groupId>
             <artifactId>antlr4-runtime</artifactId>
