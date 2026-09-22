@@ -31,3 +31,8 @@ build/
 
 ### VS Code ###
 .vscode/
+
+# Local working notes / AI assistant instructions
+claude.md
+CLAUDE.md
+.claude/
