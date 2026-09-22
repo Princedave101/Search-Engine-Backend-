@@ -6,7 +6,6 @@ It is based on `CSC322_final_project.pdf` (the brief) and `CSC322_search_engine_
 **How this file is used**
 
 - Each task has a goal, a description, a flowchart, the tests to write first (the brief asks for test-first), and a "done when" check.
-- **Owner** is a proposal: most of the work is yours. Tasks marked *Claude* are only done after you say so.
 - When a task is finished, its **Status** changes and an **Implementation notes** section is added under it, explaining what was built and why.
 - Every change is committed.
 
@@ -120,26 +119,26 @@ Design patterns used overall: **Facade** (SearchEngineAPI), **Strategy** (extrac
 
 ## 3. Task overview
 
-| ID  | Task                                  | Depends on     | Proposed owner       | Status      |
-|-----|---------------------------------------|----------------|----------------------|-------------|
-| T0  | Project setup and dependencies        | –              | Claude               | Done        |
-| T1  | Core ADTs                             | T0             | You + Claude         | Done        |
-| T2  | TextProcessor                         | T1             | You                  | Done        |
-| T3  | InvertedIndex and DocumentStore       | T1             | You                  | Done        |
-| T4  | Indexer                               | T2, T3, T6     | You                  | Done        |
-| T5  | Text extraction (Strategy + Factory)  | T1             | Claude               | Done        |
-| T6  | Trie (autocomplete)                   | –              | You                  | Done        |
-| T7  | Query grammar and parser (ANTLR)      | T2             | You                  | Done        |
-| T8  | MatchingEngine                        | T3, T7         | You                  | Not started |
-| T9  | RankingAlgorithm (TF-IDF) and snippets | T3, T7        | You                  | Not started |
-| T10 | SearchEngineAPI facade and REST API   | T4, T5, T8, T9 | You (facade), Claude (controller, needs OK) | Not started |
-| T11 | Scheduled re-indexing (2-hour limit)  | T5, T10        | Claude (needs OK)    | Not started |
-| T12 | Web GUI                               | T10            | Claude (needs OK)    | Not started |
-| T13 | Performance check (0.01 s)            | T10            | Claude (needs OK)    | Not started |
-| T14 | Index persistence (optional)          | T3             | Open                 | Not started |
-| T15 | Documentation deliverables            | All            | You + Claude         | Not started |
+| ID  | Task                                   | Depends on     | Status      |
+|-----|----------------------------------------|----------------|-------------|
+| T0  | Project setup and dependencies         | –              | Done        |
+| T1  | Core ADTs                              | T0             | Done        |
+| T2  | TextProcessor                          | T1             | Done        |
+| T3  | InvertedIndex and DocumentStore        | T1             | Done        |
+| T4  | Indexer                                | T2, T3, T6     | Done        |
+| T5  | Text extraction (Strategy + Factory)   | T1             | Done        |
+| T6  | Trie (autocomplete)                    | –              | Done        |
+| T7  | Query grammar and parser (ANTLR)       | T2             | Done        |
+| T8  | MatchingEngine                         | T3, T7         | Not started |
+| T9  | RankingAlgorithm (TF-IDF) and snippets | T3, T7         | Not started |
+| T10 | SearchEngineAPI facade and REST API    | T4, T5, T8, T9 | Not started |
+| T11 | Scheduled re-indexing (2-hour limit)   | T5, T10        | Not started |
+| T12 | Web GUI                                | T10            | Not started |
+| T13 | Performance check (0.01 s)             | T10            | Not started |
+| T14 | Index persistence (optional)           | T3             | Not started |
+| T15 | Documentation deliverables             | All            | Not started |
 
-The core ADTs and algorithms (T1–T4 and T6–T9) are what CSC322 grades, so they are yours. That comes to about 75% of the work. The proposed Claude tasks are plumbing: dependencies, file-format libraries, scheduling, the UI and the benchmark.
+T1–T4 and T6–T9 are the core ADTs and algorithms — the search engine proper, and about 75% of the work. The rest is supporting infrastructure: dependencies, file-format libraries, scheduling, the UI and the benchmark.
 
 ```mermaid
 flowchart LR
@@ -168,7 +167,7 @@ flowchart LR
 
 ### T0 — Project setup and dependencies
 
-**Owner:** Claude · **Status:** Done
+**Status:** Done
 
 **Goal:** Add the libraries and configuration the other tasks need.
 
@@ -251,7 +250,7 @@ flowchart LR
 
 ### T1 — Core ADTs
 
-**Owner:** You + Claude · **Status:** Done
+**Status:** Done
 
 **Goal:** Build the four small immutable types used by every other module.
 
@@ -289,8 +288,6 @@ Written in `src/test/java/com/daveai/searchengine/models/`: `PostingTest`, `Toke
 
 #### Implementation notes
 
-**Who did what:** you wrote the four records and their fields. Claude wrote the tests, then added the validation to make them pass.
-
 **How the rules are enforced:** each record has a *compact constructor*: a constructor with no parameter list that runs before the fields are assigned. An invalid object therefore can't be created at all.
 
 ```mermaid
@@ -323,7 +320,7 @@ flowchart TD
 
 ### T2 — TextProcessor
 
-**Owner:** You · **Status:** Done
+**Status:** Done
 
 **Goal:** Turn raw text into normalised `Token`s. The same code runs for documents and queries, so their terms always match.
 
@@ -401,8 +398,6 @@ flowchart TD
 
 #### Implementation notes
 
-**Who did what:** you wrote `TextProcessor` and `stopwords.txt`. Claude reviewed it, added Javadoc and wrote the tests.
-
 **How it works:** `indexing/TextProcessor.java` follows the steps and flowchart above.
 
 - **Constructor:** reads `static/stopwords.txt` from the classpath once and keeps the words in a `Set`.
@@ -436,7 +431,7 @@ flowchart TD
 
 ### T3 — InvertedIndex and DocumentStore
 
-**Owner:** You · **Status:** Done
+**Status:** Done
 
 **Goal:** Build the storage ADTs. Term lookup must be about O(1), because the 0.01 s target depends on it.
 
@@ -503,11 +498,6 @@ flowchart TD
 
 #### Implementation notes
 
-**Who did what**
-
-- `InvertedIndex`: you chose the term → documentID → Posting structure. Claude wrote the class, at your request, so you could study how it works.
-- `DocumentStore`: you wrote it. Claude added Javadoc, fixed a few small issues (listed below) and wrote the tests.
-
 **InvertedIndex** (`indexing/InvertedIndex.java`) keeps three maps:
 
 | Map               | Shape                          | Purpose                                                           |
@@ -549,7 +539,7 @@ Fixed in review:
 
 ### T4 — Indexer
 
-**Owner:** You · **Status:** Done
+**Status:** Done
 
 **Goal:** Run the whole indexing pipeline for one `Document`, and undo it when a document is removed.
 
@@ -646,15 +636,6 @@ Use in-memory `Document`s here, not files; reading files is T5. Build the Indexe
 
 #### Implementation notes
 
-**Who did what**
-
-- **You** wrote `Indexer`: the constructor, `indexDocument`, `removeDocument`, the grouping and the null-title fix.
-- **Claude**:
-  - changed `InvertedIndex.removeDocument` to return the removed terms;
-  - reviewed your code;
-  - swapped the grouping map for `HashMap` + `ArrayList` with `computeIfAbsent`;
-  - added Javadoc and wrote the tests.
-
 **How it works:** `indexing/Indexer.java` follows the steps and flowchart above.
 
 - **`indexDocument`:**
@@ -697,7 +678,7 @@ The project has 108 tests, all passing.
 
 ### T5 — Text extraction (Strategy + Factory)
 
-**Owner:** Claude · **Status:** Done
+**Status:** Done
 
 **Goal:** Turn a file of any supported format into a `Document`, without the Indexer knowing about formats.
 
@@ -803,7 +784,7 @@ flowchart LR
 
 ### T6 — Trie (autocomplete)
 
-**Owner:** You · **Status:** Done
+**Status:** Done
 
 **Goal:** Return suggestions for a prefix quickly (R3).
 
@@ -923,11 +904,6 @@ flowchart TD
 
 #### Implementation notes
 
-**Who did what**
-
-- You wrote the first version: the `Trie` class, the nested `TrieNode`, `insert`, and an attempt at `getSuggestion`.
-- Claude reviewed it, then finished it at your request so you could study the result: `getSuggestions`, `remove`, weights, thread safety, Javadoc and tests.
-
 **Problems found in review.** Before the fix, with `java`, `javascript` and `jar` inserted:
 
 | Call                   | Before                  | After                        |
@@ -977,7 +953,7 @@ The project has 94 tests, all passing.
 
 ### T7 — Query grammar and parser (ANTLR)
 
-**Owner:** You · **Status:** Done
+**Status:** Done
 
 **Goal:** Parse raw query text into a tree that captures what the query means. This covers R6 and the brief's parser-generator requirement.
 
@@ -1130,14 +1106,9 @@ flowchart TD
 
 #### Implementation notes
 
-**Who did what**
+**Where each file comes from**
 
-- **You** wrote the grammar `SearchQuery.g4` and the AST records in `query/ast/`, changed `Query` to hold the tree, and started `QueryParser` and `QueryAstBuilder`.
-- **Claude**, at your request, finished `QueryAstBuilder` and `QueryParser`, added `Query.terms()` and `Query.isEmpty()`, and wrote the tests.
-
-**Who makes which file**
-
-| File | Made by |
+| File | Source |
 |------|---------|
 | `src/main/antlr4/com/daveai/searchengine/query/SearchQuery.g4` | Written by hand |
 | `SearchQueryLexer`, `SearchQueryParser`, `SearchQueryVisitor`, `SearchQueryBaseVisitor` | Generated by ANTLR during `mvn compile` into `target/generated-sources/antlr4/`. Not committed. |
@@ -1209,7 +1180,7 @@ flowchart TD
 
 ### T8 — MatchingEngine
 
-**Owner:** You · **Status:** Not started
+**Status:** Not started
 
 **Goal:** Find the set of documents that satisfy the query tree.
 
@@ -1253,7 +1224,7 @@ Build a small index by hand for these.
 
 ### T9 — RankingAlgorithm (TF-IDF) and snippets
 
-**Owner:** You · **Status:** Not started
+**Status:** Not started
 
 **Goal:** Order the candidates from most to least relevant and build what the user sees (R7).
 
@@ -1293,7 +1264,7 @@ flowchart TD
 
 ### T10 — SearchEngineAPI facade and REST API
 
-**Owner:** You (facade), Claude (controller, needs OK) · **Status:** Not started
+**Status:** Not started
 
 **Goal:** One simple entry point (Facade) exposed over HTTP (R8).
 
@@ -1355,7 +1326,7 @@ sequenceDiagram
 
 ### T11 — Scheduled re-indexing (2-hour limit)
 
-**Owner:** Claude (needs OK) · **Status:** Not started
+**Status:** Not started
 
 **Goal:** A new or changed document becomes searchable within 2 hours, without a restart (R4).
 
@@ -1392,7 +1363,7 @@ Use a `@TempDir`: add a file, call `scan()`, and check it is searchable. Then mo
 
 ### T12 — Web GUI
 
-**Owner:** Claude (needs OK) · **Status:** Not started
+**Status:** Not started
 
 **Goal:** Show the API working, as the brief requires (R9).
 
@@ -1422,7 +1393,7 @@ flowchart LR
 
 ### T13 — Performance check (0.01 s)
 
-**Owner:** Claude (needs OK) · **Status:** Not started
+**Status:** Not started
 
 **Goal:** Measure and prove the response-time requirement (R2).
 
@@ -1444,7 +1415,7 @@ flowchart LR
 
 ### T14 — Index persistence (optional)
 
-**Owner:** Open · **Status:** Not started
+**Status:** Not started
 
 **Goal:** Avoid re-extracting every file on each restart.
 
@@ -1454,7 +1425,7 @@ flowchart LR
 
 ### T15 — Documentation deliverables
 
-**Owner:** You + Claude · **Status:** Not started
+**Status:** Not started
 
 - Updated class diagram reflecting the changes in section 2.
 - Sequence diagrams for "a document is indexed" and "a query comes in".
