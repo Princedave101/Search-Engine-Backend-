@@ -12,20 +12,15 @@
     <artifactId>SearchEngine</artifactId>
     <version>0.0.1-SNAPSHOT</version>
     <name>SearchEngine</name>
-    <description>A SearchEngine Project</description>
-    <url/>
+    <description>A search engine over a local document repository: text extraction, inverted index,
+        boolean and phrase query parsing, autocomplete, exposed as a Spring Boot REST API.</description>
     <licenses>
-        <license/>
+        <license>
+            <name>MIT License</name>
+            <url>https://opensource.org/licenses/MIT</url>
+            <distribution>repo</distribution>
+        </license>
     </licenses>
-    <developers>
-        <developer/>
-    </developers>
-    <scm>
-        <connection/>
-        <developerConnection/>
-        <tag/>
-        <url/>
-    </scm>
     <properties>
         <java.version>25</java.version>
         <tika.version>4.0.0</tika.version>
