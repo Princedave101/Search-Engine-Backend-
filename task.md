@@ -129,7 +129,7 @@ Design patterns used overall: **Facade** (SearchEngineAPI), **Strategy** (extrac
 | T5  | Text extraction (Strategy + Factory)   | T1             | Done        |
 | T6  | Trie (autocomplete)                    | –              | Done        |
 | T7  | Query grammar and parser (ANTLR)       | T2             | Done        |
-| T8  | MatchingEngine                         | T3, T7         | Not started |
+| T8  | MatchingEngine                         | T3, T7         | Done        |
 | T9  | RankingAlgorithm (TF-IDF) and snippets | T3, T7         | Not started |
 | T10 | SearchEngineAPI facade and REST API    | T4, T5, T8, T9 | Not started |
 | T11 | Scheduled re-indexing (2-hour limit)   | T5, T10        | Not started |
@@ -1180,32 +1180,128 @@ flowchart TD
 
 ### T8 — MatchingEngine
 
-**Status:** Not started
+**Status:** Done
 
 **Goal:** Find the set of documents that satisfy the query tree.
 
-**Description**
+**What this task is, in plain words**
 
-Evaluate the AST recursively. This is the Interpreter pattern.
+T7 turned the text the user typed into a tree. T8 turns that tree into a set of document ids, and
+stops there. No ordering, no scores, no snippets — those are T9. The answer to `java AND spring` is
+just `{doc-1}`, with no claim that doc-1 is a *good* result.
 
-| Node                 | Result                                                                                           |
-|----------------------|--------------------------------------------------------------------------------------------------|
-| `TermNode(t)`        | ids of `index.getPostings(t)`                                                                    |
-| `AndNode(children)`  | intersection. Start from the smallest set; this matters for speed.                              |
-| `OrNode(children)`   | union                                                                                            |
-| `NotNode(child)`     | `allDocumentIds() − child`. Inside an AND, prefer `left − child`, which is cheaper.              |
-| `PhraseNode(words)`  | Intersect the documents of all the words. Then keep a document only if, for some position `p` of the first word, every other word `w` occurs at `p + (w.position − first.position)`. Those are the gaps stored in the phrase, and they include removed stop words (see T7). |
+Every example below uses this four-document index:
+
+| Document | Text                    | Terms and positions                     |
+|----------|-------------------------|-----------------------------------------|
+| doc-1    | java spring framework   | java@0, spring@1, framework@2            |
+| doc-2    | java machine learning   | java@0, machine@1, learning@2            |
+| doc-3    | learning machine        | learning@0, machine@1                    |
+| doc-4    | spring boot             | spring@0, boot@1                         |
+
+**Why the tree needs recursion**
+
+`(java OR boot) AND NOT spring` parses to this tree. Each node turns into a set, and each set is
+built from the sets its children produced, so the work flows bottom-up:
+
+```mermaid
+flowchart BT
+    J["TermNode java<br/>{doc-1, doc-2}"] --> O["OrNode<br/>{doc-1, doc-2, doc-4}"]
+    B["TermNode boot<br/>{doc-4}"] --> O
+    S["TermNode spring<br/>{doc-1, doc-4}"] --> N["NotNode<br/>all − spring<br/>{doc-2, doc-3}"]
+    O --> A["AndNode<br/>OR ∩ NOT<br/>{doc-2}"]
+    N --> A
+```
+
+Read it from the leaves up:
+
+1. `java` looks up its postings: `{doc-1, doc-2}`.
+2. `boot` looks up its postings: `{doc-4}`.
+3. The OR unions what its two children returned: `{doc-1, doc-2, doc-4}`.
+4. `spring` looks up its postings: `{doc-1, doc-4}`.
+5. The NOT subtracts that from every indexed document: `{1,2,3,4} − {1,4}` = `{doc-2, doc-3}`.
+6. The AND intersects its two children: `{1,2,4} ∩ {2,3}` = `{doc-2}`.
+
+**The rule that decides the shape of the code**
+
+Each node must **return** a set of its own. It is tempting to pass one shared set down the
+recursion and let every node add to it:
+
+```java
+private void evaluate(QueryNode node, Set<String> results)   // does not work
+```
+
+That works for OR, because OR only ever adds. It cannot express AND or NOT:
+
+- **AND needs an intersection.** By the time the second child runs, the shared set already holds
+  the first child's ids. The second child can only add, so `java AND spring` grows to
+  `{doc-1, doc-2, doc-4}` — the union. AND silently behaves as OR.
+- **NOT needs a subtraction.** A node that can only add cannot remove the documents its child
+  found, so `NOT java` returns exactly the java documents: the opposite of the right answer.
+
+So the signature has to be:
+
+```java
+private Set<String> evaluate(QueryNode node)                 // works
+```
+
+and each node combines what its children returned. One more detail follows from this: a node must
+return a set nobody else owns, because its parent will call `retainAll` or `removeAll` on it. A
+`TermNode` that handed back something belonging to the index would corrupt the index.
+
+**What each node does**
+
+| Node                | Result                                                                                                                   | Example                                        |
+|---------------------|--------------------------------------------------------------------------------------------------------------------------|------------------------------------------------|
+| `TermNode(t)`       | the ids in `index.getPostings(t)`                                                                                          | `java` → `{doc-1, doc-2}`                       |
+| `AndNode(children)` | intersection. Evaluate every child, sort the results smallest first, then intersect — the running set only shrinks, so the fewest lookups are done. | `java AND spring` → `{doc-1}`                   |
+| `OrNode(children)`  | union                                                                                                                      | `java OR boot` → `{doc-1, doc-2, doc-4}`        |
+| `NotNode(child)`    | `allDocumentIds()` minus the child's set. `allDocumentIds()` is a read-only live view of the index, so it must be copied before subtracting. | `NOT java` → `{doc-3, doc-4}`                   |
+| `PhraseNode(words)` | see below                                                                                                                  | `"machine learning"` → `{doc-2}`                |
+| `null` root         | empty set. The parser returns a null root for blank text or a query of nothing but stop words.                             | `the` → `{}`                                    |
+
+**Phrase matching, step by step**
+
+This is the only node that uses the positions stored in the postings, and the only one worth
+walking through slowly. Take `"state of the art"`.
+
+1. **What the parser stored.** `TextProcessor` dropped `of` and `the` as stop words but kept the
+   positions of the words it kept, so the phrase arrives as two tokens: `state@0, art@3`.
+2. **Turn positions into gaps.** The gap of each word is its position minus the first word's:
+   `state` has gap 0, `art` has gap 3. The gaps are what matching uses, and because they come from
+   the token positions rather than from the list index, the two removed stop words are still
+   accounted for. Using the list index would give a gap of 1 and match the wrong documents.
+3. **Narrow to candidates.** A document can only hold the phrase if it holds every word, so
+   intersect the documents of all the words first. This is cheap and leaves few documents for the
+   expensive step.
+4. **Check the positions.** For each candidate, take each position `p` of the *first* word and ask
+   whether every other word occurs at `p + its gap`. If one position `p` works, the document
+   matches.
+
+Two documents make the difference concrete:
+
+| Document positions   | Try p = 10                                   | Match? |
+|----------------------|----------------------------------------------|--------|
+| state@10, art@13     | is there an `art` at 10 + 3 = 13? yes        | yes    |
+| state@10, art@11     | is there an `art` at 10 + 3 = 13? no         | no     |
+
+Step 4 says *each* position of the first word, not the first one. In a document reading
+`machine java … machine learning`, `machine` is at 0 and 5. Starting at 0 fails, because there is
+no `learning` at 1. Starting at 5 succeeds. Checking only position 0 would miss the document.
 
 ```mermaid
 flowchart TD
     A["evaluate(node)"] --> B{"node type"}
-    B -- Term --> C["ids from postings"]
-    B -- And --> D["evaluate children, sort by size, intersect"]
-    B -- Or --> E["evaluate children, union"]
-    B -- Not --> F["all ids minus evaluate(child)"]
-    B -- Phrase --> G["intersect docs of all words"]
-    G --> H["for each doc: is there a position p of the first word<br/>where every word w is at p + (w.position - first.position)?"]
-    H --> I["keep matching docs"]
+    B -- null --> Z["empty set"]
+    B -- Term --> C["ids from index.getPostings(term)"]
+    B -- Or --> E["evaluate each child, union"]
+    B -- And --> D["evaluate each child,<br/>sort smallest first, intersect"]
+    B -- Not --> F["copy allDocumentIds(),<br/>remove evaluate(child)"]
+    B -- Phrase --> G["gap of each word =<br/>its position − first word's position"]
+    G --> H["candidates = documents holding every word"]
+    H --> I{"for a candidate,<br/>is there a position p of the first word<br/>where every word w sits at p + gap(w)?"}
+    I -- yes --> J["keep the document"]
+    I -- no --> K["drop it"]
 ```
 
 **Tests first**
@@ -1214,11 +1310,60 @@ Build a small index by hand for these.
 
 - AND, OR and NOT give the expected sets of document ids.
 - A phrase matches `"machine learning"`, but not a document containing `"learning machine"`.
-- `"state of the art"`, stored as `[state@0, art@3]`, matches a document with `state@10, art@13`, but not one with `state@10, art@11`.
+- `"state of the art"`, stored as `[state@0, art@3]`, matches a document with `state@10, art@13`,
+  but not one with `state@10, art@11`.
+- A phrase matches at a later occurrence of its first word, not only the earliest.
 - An unknown term gives an empty set; inside an OR, the other side still returns results.
 - A query with a `null` root (nothing searchable) gives an empty set.
+- NOT leaves the index untouched.
 
 **Done when:** tests pass.
+
+#### Implementation notes
+
+**How it works.** `matching/MatchingEngine.java` holds the `InvertedIndex` and exposes one method,
+`retrieve(Query)`, which returns `evaluate(query.root())`. `evaluate` is a `switch` over the node
+type with one small helper per case:
+
+| Case          | Helper                     | What it does                                                         |
+|---------------|----------------------------|----------------------------------------------------------------------|
+| `null`        | –                          | returns an empty set                                                  |
+| `TermNode`    | `documentsContaining`      | collects `posting.documentID()` into a new set                        |
+| `AndNode`     | `intersection`             | evaluates the children, returns early if any is empty, sorts the results smallest first, copies the smallest and `retainAll`s the rest |
+| `OrNode`      | `union`                    | `addAll` of every child                                               |
+| `NotNode`     | `everythingExcept`         | copies `allDocumentIds()` and `removeAll`s the child's set            |
+| `PhraseNode`  | `documentsWithPhrase`      | the four steps above, with `positionsByDocument` building document → positions for one word |
+
+Because `QueryNode` is sealed and every case is covered, the switch needs no `default`: adding a
+node type later is a compile error here rather than an `IllegalStateException` at runtime.
+
+**The mistake in the first attempt.** The first version used
+`private void evaluateNode(QueryNode node, Set<String> documentIDSet)`, with each node adding into
+one shared set. Nine of the nineteen tests passed, and the ten failures were all the same cause:
+AND and OR had identical bodies so AND returned the union, and NOT returned its child's documents
+instead of their complement. It was fixed by changing the signature to return a set, as explained
+above. Worth noticing in the test run: four of the nine "passing" tests passed only because the
+phrase case returned nothing, and assertions that something is *absent* are satisfied by an empty
+result. A green test is not always a working feature.
+
+**Decisions**
+
+- **Intersect smallest first.** `rare AND common` costs the size of `rare`. The running set only
+  ever shrinks, and the loop stops early once it is empty.
+- **`allDocumentIds()` is copied, not used directly.** It is an unmodifiable view of the index's own
+  key set: `removeAll` on it throws, and it changes as documents are indexed.
+- **Phrase positions are held as a `Set<Integer>` per document,** not the `List` the posting stores,
+  because the check only ever asks "is there a word at this position?" — a hash lookup rather than a
+  scan of the list.
+- **`retrieve(null)` throws `NullPointerException`,** matching `Indexer.indexDocument(null)`. A
+  *query* with a null root is different: that is a legal empty query and returns an empty set.
+- **Not implemented: rewriting `A AND NOT B` into `A − B`.** The spec suggests it as an
+  optimisation. It is faster, because it never materialises the complement of B, but it makes the
+  NOT case depend on its parent. Left out until T13 shows it is needed.
+
+**Tests:** `MatchingEngineTest` has 19 tests over a seven-document hand-built index, covering the
+list above plus nesting, an empty index, and an unknown word inside a phrase. The project has 191
+tests, all passing.
 
 ---
 
