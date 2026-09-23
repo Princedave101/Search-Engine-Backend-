@@ -30,8 +30,8 @@ in progress — the REST endpoints are the next milestone and are **not live yet
 | `Indexer` — the full indexing pipeline | Done |
 | `Trie` — prefix autocomplete | Done |
 | Query grammar and parser (ANTLR) → AST | Done |
-| `MatchingEngine` — AST evaluation | Next |
-| TF-IDF ranking and snippets | Planned |
+| `MatchingEngine` — AST evaluation | Done |
+| TF-IDF ranking and snippets | Next |
 | REST API (`/api/v1/search`) and web GUI | Planned |
 | Scheduled re-indexing | Planned |
 
@@ -175,7 +175,7 @@ Drop files into `documents/` to have them indexed. A few samples are included.
 
 The project is written test-first, as the brief requires. Every component has a unit
 test beside it under `src/test/java`, and the extractors are exercised against real
-sample files (`src/test/resources/samples/`) — one per supported format. 172 tests
+sample files (`src/test/resources/samples/`) — one per supported format. 191 tests
 currently pass; they run on every push through GitHub Actions.
 
 ```bash
