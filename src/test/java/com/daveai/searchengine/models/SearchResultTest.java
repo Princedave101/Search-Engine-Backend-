@@ -15,7 +15,7 @@ class SearchResultTest {
         assertThat(result.documentID()).isEqualTo("doc-1");
         assertThat(result.title()).isEqualTo("Title");
         assertThat(result.snippet()).isEqualTo("...matched text...");
-        assertThat(result.score()).isEqualTo(1.5);
+        assertThat(result.rankingScore()).isEqualTo(1.5);
     }
 
     @Test

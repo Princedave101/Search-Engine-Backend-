@@ -263,7 +263,7 @@ Use Java `record`s. They are immutable, which also makes them safe to read from 
 | `Token`        | `value`, `documentId`, `position`                       | `value` not blank; `position >= 0`                 |
 | `Posting`      | `documentId`, `frequency`, `positions: List<Integer>`   | `documentId` not blank; `frequency >= 1`; `frequency == positions.size()`; positions `>= 0` and strictly increasing; defensive copy of the list |
 | `Document`     | `id`, `title`, `rawText`                                | `id` not blank; `rawText` not null (may be empty)  |
-| `SearchResult` | `documentId`, `title`, `snippet`, `score`               | `score >= 0` and not NaN                           |
+| `SearchResult` | `documentId`, `title`, `snippet`, `rankingScore`               | `rankingScore >= 0` and not NaN                           |
 
 - A null value throws `NullPointerException`, for example via `Objects.requireNonNull`. An invalid value throws `IllegalArgumentException`.
 - `Document` has no `sourcePath`. Its `id` is the file's path relative to `documents/`, so the original file can be found from the id.
@@ -308,7 +308,7 @@ flowchart TD
 
 - **`Posting` copies its list** with `List.copyOf`. The copy can't be modified, and changing the caller's original list no longer affects the index. The ordering check runs on this copy.
 - **Positions must be strictly increasing** (for example `[1, 5, 9]`). Phrase matching in T8 relies on reading positions in order.
-- **`SearchResult` rejects NaN scores.** `score < 0` alone is false for NaN, so the check is `Double.isNaN(score) || score < 0`.
+- **`SearchResult` rejects NaN rankingScores.** `rankingScore < 0` alone is false for NaN, so the check is `Double.isNaN(rankingScore) || rankingScore < 0`.
 - **`Token` doesn't validate `documentID`.** Query tokens (T2/T7) might not belong to any document.
 - **`Document` allows empty `rawText`,** so a file with no extractable text can still be found by its title.
 
@@ -1369,7 +1369,7 @@ tests, all passing.
 
 ### T9 — RankingAlgorithm (TF-IDF) and snippets
 
-**Status:** Not started
+**Status:** Done
 
 **Goal:** Order the candidates from most to least relevant and build what the user sees (R7).
 
@@ -1379,8 +1379,8 @@ tests, all passing.
 - `TfIdfRanking` (vector space model, as in the brief's background reading). For each candidate document `d` and each query term `t`:
   - `tf(t,d) = 1 + log(frequency)`
   - `idf(t) = log(N / df(t))`, where `N` = total documents and `df` = documents containing `t`
-  - `score(d) = Σ tf(t,d) · idf(t)`, divided by `sqrt(length(d))` so long documents don't win just by being long
-- Sort by score, highest first; break ties by title so results are stable. Keep the top `limit`.
+  - `rankingScore(d) = Σ tf(t,d) · idf(t)`, divided by `sqrt(length(d))` so long documents don't win just by being long
+- Sort by rankingScore, highest first; break ties by title so results are stable. Keep the top `limit`.
 - Build `SnippetBuilder` output **only for those top results**; building snippets is the slow part.
 - `SnippetBuilder`: find the first occurrence of a query term in `rawText` and take about 80 characters on each side. Cut at word boundaries and add "…".
 - *(Optional)* Add a `Bm25Ranking` strategy and compare the two in your report.
@@ -1389,7 +1389,7 @@ tests, all passing.
 flowchart TD
     A["rank(docIds, query, limit)"] --> B["for each doc: sum tf x idf over query terms"]
     B --> C["normalise by document length"]
-    C --> D["sort by score desc, then title"]
+    C --> D["sort by rankingScore desc, then title"]
     D --> E["take top limit"]
     E --> F["build snippet for each (from DocumentStore)"]
     F --> G["return List of SearchResult"]
@@ -1401,9 +1401,68 @@ flowchart TD
 - A rare term contributes more than a common one.
 - `limit` is respected.
 - The snippet contains the matched term.
-- Ordering is deterministic when scores tie.
+- Ordering is deterministic when rankingScores tie.
 
 **Done when:** tests pass.
+
+#### Implementation notes
+
+**How it works.** Three classes in `ranking/`:
+
+| Class            | Role                                                                                   |
+|------------------|----------------------------------------------------------------------------------------|
+| `TfIdfRanking`   | implements `RankingAlgorithm`; reads postings and document lengths from the `InvertedIndex`, titles and text from the `DocumentStore` |
+| `RankingScore`   | `record RankingScore(String docId, String term, Double score)`, one per candidate document; `term` is the first query term the document contains, used for its snippet |
+| `SnippetBuilder` | static `buildSnippet(text, term)`: about 80 characters each side of the term, cut at word boundaries, "…" at each cut end |
+
+`rank` does three steps:
+
+1. For every candidate, add up `tf(t,d) · idf(t)` over `query.terms()`, then divide the total by
+   `sqrt(documentLength(d))`, giving one `RankingScore` per document.
+2. Sort by score descending, then title ascending, and keep the top `limit`.
+3. Build a snippet and a `SearchResult` only for those top results.
+
+**Bugs found by the tests, and the fixes.** All six T9 tests failed at first. Every ranking test
+crashed inside the snippet builder, which hid the ranking bugs behind it. The structure stayed;
+each fix is a line or two:
+
+| Bug                                                                  | Fix                                                              |
+|----------------------------------------------------------------------|------------------------------------------------------------------|
+| `RankingScore` was created inside the term loop, so one per term     | create it once, after the loop                                   |
+| `sum += tf`, then `sum * idf`, so only the last term's idf was used | `sum += tf * idf`                                                |
+| divided by `sqrt(docIds.size())`, the same for every document        | divide by `sqrt(documentLength(docId))`, at least 1              |
+| tf used `.count()` of postings (always 0 or 1)                       | use `posting.frequency()`; return 0 when the term is missing (`log(0)` is -∞) |
+| idf of an unknown term was `log(N/0)` = ∞, and `0 · ∞` is NaN        | return 0 when `df` is 0                                          |
+| comparator sorted lowest score first                                 | compare `score2` to `score1`                                     |
+| `Collectors.toSet()` threw the sorted order away                     | `.toList()`                                                      |
+| snippet: `static StringBuilder` kept every earlier snippet           | a new builder per call                                           |
+| snippet: fixed `+ 40` end ran past the text (`StringIndexOutOfBounds`) | end at `min(text.length(), ...)`; add "...." only if cut       |
+| snippet: case-sensitive search, and threw if the term was missing    | case-insensitive search; fall back to the start of the text (title-only matches) |
+| snippet: searching `text.toLowerCase()` crashed on text like "İ", which lowercases to two characters and shifts every index after it | `indexOfIgnoreCase` with `regionMatches`, which searches the original text |
+
+**Config fix found on the way.** `SearchEngine` (an early T10 `@Service`) needed a `QueryParser`
+bean that `ConfigurationComponent` didn't define, so the Spring context failed to start. A
+`queryParser(TextProcessor)` bean was added.
+
+**Paging fix in `SearchEngine.search` (early T10).** `rank(..., page * pageSize)` returned every
+result up to the end of the page, so page 2 also included page 1. Pages start at 1; the facade now
+skips the first `(page - 1) * pageSize` results and rejects `page` or `pageSize` below 1.
+
+**`SearchResult.score` renamed to `rankingScore`** in the record and its tests.
+
+**Snippet spec items, added after the bug fixes.** The window is now 80 characters each side
+(`SUBSTRING_LENGTH`). A start that lands mid-word moves forward to the next word, and an end that lands
+mid-word moves back to the last space. If there is no space between the cut and the term, the start
+begins at the term itself and the end is cut mid-word, so the snippet is never empty. Each cut end
+gets "…", which replaces the old "....".
+
+**Not implemented:** the optional `Bm25Ranking`.
+
+**Tests:** `TfIdfRankingTest` (4) covers term frequency, summing before normalising, `limit` per
+document, and title tie-break. `SnippetBuilderTest` (10) covers a match near the end of short text,
+no leaking between calls, the "İ" crash, the missing-term fallback, the 80-character window, word
+boundaries, "…" only at cut ends, short text kept whole, and text with no spaces. The project has
+205 tests, all passing.
 
 ---
 
@@ -1518,7 +1577,7 @@ Plain HTML/CSS/JavaScript in `src/main/resources/static/`, with no framework. Th
 
 - `index.html`: a search box and button, plus an autocomplete dropdown that calls `/api/v1/autocomplete`.
   - Requests are debounced by about 150 ms, and the arrow keys and Enter work.
-- `results.html?q=`: opens as a **new page**. It lists the title, snippet with highlighted terms, score and "N results in X ms", with pagination.
+- `results.html?q=`: opens as a **new page**. It lists the title, snippet with highlighted terms, rankingScore and "N results in X ms", with pagination.
 - `document.html?id=`: shows the extracted text with the query terms highlighted, plus a link to open the original file.
 
 ```mermaid
