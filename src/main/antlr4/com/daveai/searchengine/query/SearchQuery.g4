@@ -12,6 +12,7 @@ NOT    : 'NOT' | '-' ;
 LPAREN : '(' ;
 RPAREN : ')' ;
 PHRASE : '"' ~["]* '"' ;
-TERM   : [\p{L}\p{N}]+ ;
+TERM   : WORD ('-' WORD)* ;           // a '-' inside a word (e-mail) is part of it, not NOT
+fragment WORD : [\p{L}\p{N}]+ ;
 WS     : [ \t\r\n]+ -> skip ;
 OTHER  : . -> skip ;                  // ignore any other character: ? , ! ' etc.

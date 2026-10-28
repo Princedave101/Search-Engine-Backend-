@@ -93,29 +93,30 @@ public class QueryAstBuilder extends SearchQueryBaseVisitor<QueryNode> {
     @Override
     public QueryNode visitPrimary(SearchQueryParser.PrimaryContext ctx) {
         if (ctx.TERM() != null) {
-            // A TERM holds only letters and digits, so it gives no token (a stop word) or exactly one.
-            List<Token> tokens = processor.processText(ctx.TERM().getText(), null);
-            if (tokens.isEmpty()) {
-                return null;
-            }
-            return new TermNode(tokens.getFirst().value());
+            // Usually one word. A hyphenated TERM (e-mail) splits into several, like it does in documents,
+            // so it is searched as a phrase.
+            return wordsToNode(ctx.TERM().getText());
         }
 
         if (ctx.PHRASE() != null) {
             String quoted = ctx.PHRASE().getText();
-            String text = quoted.substring(1, quoted.length() - 1);   // strip the quotes
-            // Stop words are removed but still counted, so "state of the art" gives state@0, art@3.
-            List<Token> words = processor.processText(text, null);
-            if (words.isEmpty()) {
-                return null;
-            }
-            if (words.size() == 1) {
-                return new TermNode(words.getFirst().value());
-            }
-            return new PhraseNode(words);
+            return wordsToNode(quoted.substring(1, quoted.length() - 1));   // strip the quotes
         }
 
         return visit(ctx.orExpr());         // brackets: ( orExpr )
+    }
+
+    /** No words left gives null, one word a Term, more than one a Phrase. */
+    private QueryNode wordsToNode(String text) {
+        // Stop words are removed but still counted, so "state of the art" gives state@0, art@3.
+        List<Token> words = processor.processText(text, null);
+        if (words.isEmpty()) {
+            return null;
+        }
+        if (words.size() == 1) {
+            return new TermNode(words.getFirst().value());
+        }
+        return new PhraseNode(words);
     }
 
     /** Visits each context in order and keeps only the results that are not null (the "drop the nulls" step). */

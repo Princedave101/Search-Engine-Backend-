@@ -76,6 +76,35 @@ class TfIdfRankingTest {
         assertThat(results).extracting(SearchResult::title).containsExactly("Alpha", "Zulu");
     }
 
+    @Test
+    void tiesWithoutTitlesDoNotCrashAndFallBackToTheId() {
+        InvertedIndex index = new InvertedIndex();
+        DocumentStore store = new DocumentStore();
+        addDocument(index, store, "b", null, "java", "java", 0);
+        addDocument(index, store, "a", null, "java", "java", 0);
+        addDocument(index, store, "titled", "Titled", "java", "java", 0);
+
+        List<SearchResult> results = new TfIdfRanking(index, store)
+                .rank(Set.of("a", "b", "titled"), termQuery("java"), 3);
+
+        // titled documents first, then untitled ones by id
+        assertThat(results).extracting(SearchResult::documentID).containsExactly("titled", "a", "b");
+    }
+
+    @Test
+    void skipsADocumentRemovedFromTheStoreAfterMatching() {
+        InvertedIndex index = new InvertedIndex();
+        DocumentStore store = new DocumentStore();
+        addDocument(index, store, "kept", "Kept", "java", "java", 0);
+        addDocument(index, store, "gone", "Gone", "java", "java", 0);
+        store.remove("gone"); // removed between matching and ranking
+
+        List<SearchResult> results = new TfIdfRanking(index, store)
+                .rank(Set.of("kept", "gone"), termQuery("java"), 10);
+
+        assertThat(results).extracting(SearchResult::documentID).containsExactly("kept");
+    }
+
     private static Query termQuery(String term) {
         return new Query(term, new TermNode(term));
     }

@@ -81,6 +81,23 @@ class QueryParserTest {
     }
 
     @Test
+    void aHyphenInsideAWordIsNotTheNotOperator() {
+        // "machine-learning" is indexed as machine@k, learning@k+1, so it is searched as a phrase
+        assertThat(rootOf("machine-learning")).isEqualTo(phrase(word("machine", 0), word("learning", 1)));
+        assertThat(rootOf("java e-mail")).isEqualTo(and(term("java"), phrase(word("e", 0), word("mail", 1))));
+    }
+
+    @Test
+    void aHyphenedWordWithAStopWordKeepsTheGap() {
+        assertThat(rootOf("state-of-the-art")).isEqualTo(phrase(word("state", 0), word("art", 3)));
+    }
+
+    @Test
+    void aMinusAfterASpaceIsStillNot() {
+        assertThat(rootOf("java -e-mail")).isEqualTo(and(term("java"), not(phrase(word("e", 0), word("mail", 1)))));
+    }
+
+    @Test
     void symbolOperatorsWorkLikeWordOperators() {
         assertThat(rootOf("java & spring | python"))
                 .isEqualTo(or(and(term("java"), term("spring")), term("python")));

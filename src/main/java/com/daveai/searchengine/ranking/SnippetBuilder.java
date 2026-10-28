@@ -1,8 +1,11 @@
 package com.daveai.searchengine.ranking;
 
+import java.util.regex.Pattern;
+
 public class SnippetBuilder {
 
-    private final static int SUBSTRING_LENGTH = 80;
+    private static final int SUBSTRING_LENGTH = 80;
+    private static final Pattern WHITESPACE = Pattern.compile("\\s+");
 
     public static String buildSnippet(String text, String term){
         // a new builder per call, so text from earlier snippets doesn't leak into this one
@@ -39,7 +42,8 @@ public class SnippetBuilder {
         if (start > 0) {
             stringBuilder.append("…");
         }
-        stringBuilder.append(text, start, end);
+        // extracted text keeps the file's line breaks and indentation; a snippet reads better on one line
+        stringBuilder.append(WHITESPACE.matcher(text.substring(start, end)).replaceAll(" ").strip());
         if (end < text.length()) {
             stringBuilder.append("…");
         }

@@ -31,6 +31,13 @@ class SnippetBuilderTest {
     }
 
     @Test
+    void collapsesLineBreaksAndRunsOfSpaces() {
+        String snippet = SnippetBuilder.buildSnippet("Department\n\n\n    of   Computer\tScience java", "java");
+
+        assertThat(snippet).isEqualTo("Department of Computer Science java");
+    }
+
+    @Test
     void fallsBackToTheStartOfTheTextWhenTheTermIsMissing() {
         assertThat(SnippetBuilder.buildSnippet("matched by title only", "java")).startsWith("matched");
     }
