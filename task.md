@@ -130,13 +130,14 @@ Design patterns used overall: **Facade** (SearchEngineAPI), **Strategy** (extrac
 | T6  | Trie (autocomplete)                    | –              | Done        |
 | T7  | Query grammar and parser (ANTLR)       | T2             | Done        |
 | T8  | MatchingEngine                         | T3, T7         | Done        |
-| T9  | RankingAlgorithm (TF-IDF) and snippets | T3, T7         | Not started |
-| T10 | SearchEngineAPI facade and REST API    | T4, T5, T8, T9 | Not started |
+| T9  | RankingAlgorithm (TF-IDF) and snippets | T3, T7         | Done        |
+| T10 | SearchEngineAPI facade and REST API    | T4, T5, T8, T9 | Done        |
 | T11 | Scheduled re-indexing (2-hour limit)   | T5, T10        | Not started |
 | T12 | Web GUI                                | T10            | Not started |
 | T13 | Performance check (0.01 s)             | T10            | Not started |
 | T14 | Index persistence (optional)           | T3             | Not started |
 | T15 | Documentation deliverables             | All            | Not started |
+| T16 | Health checks (/actuator/health)       | T10            | Done        |
 
 T1–T4 and T6–T9 are the core ADTs and algorithms — the search engine proper, and about 75% of the work. The rest is supporting infrastructure: dependencies, file-format libraries, scheduling, the UI and the benchmark.
 
@@ -780,6 +781,13 @@ flowchart LR
 | `ExtractorFactoryTest` | 7 | All 13 extensions supported; picks by extension; case-insensitive matching; unsupported extension and no extension; `isSupported`; two extractors claiming the same extension |
 | `DocumentLoaderTest` | 7 | Relative id with forward slashes; metadata title; file-name title fallback; extracted text; file outside the repository; unsupported type; **end to end**: all 12 samples loaded and indexed, with "inverted" found in 12 documents |
 
+**Later fix (found by uploading a scanned PDF).** Tika 4's PDF parser tries OCR on pages with little or no
+text, and with no OCR engine installed it throws a `NullPointerException` (`this.ocrParser is null`). Two fixes:
+`PdfExtractor` turns OCR off (`OcrConfig.Strategy.NO_OCR`), so such pages give empty text; and
+`TikaTextExtractor` wraps any `RuntimeException` from a parser in `DocumentExtractionException`, so one bad
+file gives a 422 on upload and is skipped by a rescan instead of stopping it. Tests:
+`pdfPageWithNoTextGivesEmptyTextInsteadOfTryingOcr`, `anUnexpectedParserErrorBecomesDocumentExtractionException`.
+
 ---
 
 ### T6 — Trie (autocomplete)
@@ -1176,6 +1184,12 @@ flowchart TD
 | `QueryParserTest` | 26 | Every worked example above; `&` and `\|`; lowercase `or` as an ordinary word; one-word phrase; `java OR the`; `java -the`; stray `)`; unclosed quote; null, empty, blank and symbol-only text give an empty query; raw text kept; `terms()` of a parsed query; null processor |
 | `QueryTest` | 8 | `isEmpty`; terms from Term, Phrase, And and Or nodes; words under a NOT skipped, including nested ones; repeated words listed once; the list cannot be modified |
 
+**Later fix (release review).** A `-` inside a word was lexed as NOT, so `e-mail` meant `e NOT mail`.
+`TERM` now allows hyphens between letters (`WORD ('-' WORD)*`); a hyphenated term splits into several words,
+like it does in documents, and becomes a phrase (`machine-learning` → "machine learning"). A `-` after a
+space is still NOT. Tests: `aHyphenInsideAWordIsNotTheNotOperator`, `aHyphenedWordWithAStopWordKeepsTheGap`,
+`aMinusAfterASpaceIsStillNot`.
+
 ---
 
 ### T8 — MatchingEngine
@@ -1464,11 +1478,21 @@ no leaking between calls, the "İ" crash, the missing-term fallback, the 80-char
 boundaries, "…" only at cut ends, short text kept whole, and text with no spaces. The project has
 205 tests, all passing.
 
+**Later fixes (release review).**
+
+| Problem | Fix |
+|---|---|
+| tf was found by scanning every posting of the term for every candidate: O(candidates × df) per query | each term's postings are read once into `docId → frequency` |
+| tie-break called `title().compareTo`, and a title can be null | titles compared with nulls last, then by id, so the order is always the same |
+| a document removed between matching and ranking threw `NoSuchElementException`, so the search returned 404 | it is skipped |
+| N came from the store and df from the index; while the indexer is between the two, df > N made the idf negative and `SearchResult` threw | N is `invertedIndex.documentCount()`, so df ≤ N always |
+| snippets kept the file's line breaks and indentation | runs of whitespace collapse to one space |
+
 ---
 
 ### T10 — SearchEngineAPI facade and REST API
 
-**Status:** Not started
+**Status:** Done
 
 **Goal:** One simple entry point (Facade) exposed over HTTP (R8).
 
@@ -1492,7 +1516,7 @@ It is wired as a Spring bean in a `@Configuration` class. The controller never t
 | GET    | `/api/v1/search?q=&page=&size=` | Ranked results                                 |
 | GET    | `/api/v1/autocomplete?q=&limit=`| Suggestions                                    |
 | GET    | `/api/v1/documents/{id}`        | Document title and extracted text              |
-| GET    | `/api/v1/documents/{id}/file`   | Original file (inline view or download)        |
+| GET    | `/api/v1/files/{id}`            | Original file (inline view or download)        |
 | POST   | `/api/v1/documents` (multipart) | Upload a file: saved to `documents/` and indexed immediately |
 | POST   | `/api/v1/index/refresh`         | Trigger a full rescan                          |
 
@@ -1525,6 +1549,140 @@ sequenceDiagram
 - MockMvc tests for each endpoint, including the 400/404/415 cases.
 
 **Done when:** `mvn spring-boot:run` and `curl "localhost:8080/api/v1/search?q=..."` return ranked JSON.
+
+#### Implementation notes
+
+**How it works.** Three layers, each with one job:
+
+```mermaid
+flowchart LR
+    C["Client / GUI"] -->|HTTP| RC["SearchController<br/>(api/)"]
+    RC -->|plain Java calls| F["SearchEngine facade<br/>(services/)"]
+    F --> P["QueryParser"]
+    F --> M["MatchingEngine"]
+    F --> R["RankingAlgorithm"]
+    F --> I["Indexer"]
+    F --> L["DocumentLoader"]
+    F --> T["Trie"]
+    F --> S["DocumentStore"]
+    RC -. exception .-> A["RestControllerExceptionHandler"]
+    A -->|ExceptionResponse JSON| C
+```
+
+- The **controller** only reads HTTP parameters, calls the facade and builds HTTP responses.
+- The **facade** (`services/SearchEngine`, a `@Service`) holds all the logic. Its dependencies are the
+  beans in `ConfigurationComponent`, so it reads the same index, store and trie the `Indexer` writes to.
+- The **advice** turns every exception into an `ExceptionResponse` with the right status.
+
+**Facade methods**
+
+| Method                         | What it does                                                                         |
+|--------------------------------|--------------------------------------------------------------------------------------|
+| `indexDocument(Document)`      | `Indexer.indexDocument`; replaces an older version                                   |
+| `indexFile(Path)`              | `DocumentLoader.load`, then index; returns the `Document`                             |
+| `removeDocument(id)`           | `Indexer.removeDocument`                                                             |
+| `search(q, page, pageSize)`    | parse, retrieve, rank, take one page; returns a `SearchResponse`                      |
+| `autocomplete(input, limit)`   | `Trie.getSuggestions`, never more than `search.autocomplete-limit`                    |
+| `getDocument(id)`              | reads `DocumentStore`; `NoSuchElementException` for an unknown id                     |
+| `getDocumentFile(id)`          | the original file of an *indexed* document; `NoSuchElementException` if unknown or gone |
+| `uploadFile(name, content)`    | saves the file in the repository's top folder, then indexes it                        |
+| `reindexAll()`                 | full rescan of the repository; returns a `RefreshReport`                              |
+
+```mermaid
+flowchart TD
+    A["search(q, page, pageSize)"] --> B{"1 <= pageSize <= 100,<br/>page >= 1,<br/>page * pageSize fits an int?"}
+    B -- no --> X["IllegalArgumentException (400)"]
+    B -- yes --> C["start timer"]
+    C --> D["QueryParser.parse(q)"]
+    D --> E["MatchingEngine.retrieve → Set of docIds"]
+    E --> F["rank(docIds, query, page * pageSize)"]
+    F --> G["skip (page - 1) * pageSize"]
+    G --> H["SearchResponse(q, totalHits = docIds.size(), tookMillis, results)"]
+```
+
+**Upload** (`uploadFile`):
+
+```mermaid
+flowchart TD
+    A["uploadFile(name, content)"] --> B["keep only the file name<br/>(drops C:\fakepath\ and ../)"]
+    B --> C{"blank, '.' or '..'?"}
+    C -- yes --> X1["IllegalArgumentException (400)"]
+    C -- no --> D{"supported extension?"}
+    D -- no --> X2["UnsupportedDocumentTypeException (415)<br/>nothing saved"]
+    D -- yes --> E["save to documents/name<br/>(replaces a file with the same name)"]
+    E --> F["indexFile"]
+    F -- reads --> G["return Document (201)"]
+    F -- can't read --> H["delete the file and its index entry"] --> X3["DocumentExtractionException (422)"]
+```
+
+**Rescan** (`reindexAll`): walk the repository, index every supported file, and drop every document whose
+file is gone. An unreadable file is logged, left out of the index and listed in `failed`; the scan carries
+on. The folder is the source of truth, so a document added with `indexDocument` and no file is dropped too.
+`uploadFile` and `reindexAll` are `synchronized`, so a rescan can't drop a file that is being uploaded.
+
+**REST endpoints** (`SearchController`, all under `/api/v1`):
+
+| Method | Path                               | Response                                                     |
+|--------|------------------------------------|--------------------------------------------------------------|
+| GET    | `/search?q=&page=1&size=10`        | `SearchResponse`; `size` at most 100                          |
+| GET    | `/autocomplete?q=&limit=`          | list of words; `limit` defaults to `search.autocomplete-limit` |
+| GET    | `/documents/{id}`                  | `Document` (id, title, rawText)                               |
+| GET    | `/files/{id}?download=false`       | the original file, `inline` or `attachment`                   |
+| POST   | `/documents` (multipart, `file`)   | 201 Created, `Location` header, the new `Document`            |
+| POST   | `/index/refresh`                   | `RefreshReport(indexed, removed, failed, tookMillis, finishedAt)` |
+| GET    | `/api/v1` (`HomeController`)       | name and list of endpoints                                    |
+
+**Changes from the plan:**
+
+- **Ids with slashes.** Ids are relative paths such as `ml/intro.txt`. A `{id}` path variable matches one
+  segment only, and Tomcat rejects `%2F`, so the mappings use `{*id}`, which captures the rest of the URL.
+  `{*id}` must end the pattern, so the original file moved from `/documents/{id}/file` to `/files/{id}`.
+- **Facade stub.** `indexDocument` returns `void` (the `Indexer` returns nothing), `indexFile` returns the
+  `Document`, and `search` returns `SearchResponse` instead of `List<SearchResult>`.
+- **Bug fixed:** `page * pageSize` could overflow and pass a negative limit to `rank`. The facade now caps
+  `pageSize` at `MAX_PAGE_SIZE` (100) and rejects a page whose offset doesn't fit an int.
+
+**Errors** (`RestControllerExceptionHandler`). Every error body is
+`ExceptionResponse(status, error, message, path, timestamp)`, e.g.
+`{"status":404,"error":"Not Found","message":"no document with id x.txt","path":"/api/v1/documents/x.txt","timestamp":"..."}`.
+
+| Exception                                         | Status | Message sent                              |
+|---------------------------------------------------|--------|-------------------------------------------|
+| `IllegalArgumentException`                        | 400    | its message                               |
+| `MethodArgumentTypeMismatchException` (`page=abc`) | 400    | `Invalid value 'abc' for parameter 'page'` |
+| `NoSuchElementException`                          | 404    | its message                               |
+| `UnsupportedDocumentTypeException`                | 415    | its message (file name only)              |
+| `DocumentExtractionException`                     | 422    | `Could not read the document` (the real message has a server path; it is logged) |
+| Spring's own (missing `q`, unknown URL, wrong method, upload too large) | theirs (400/404/405/413) | Spring's detail |
+| anything else                                     | 500    | `Internal server error` (logged)          |
+
+**Other settings** (`application.yaml`):
+
+- `search.cors-allowed-origins` (`CorsConfig`): sites allowed to call the API from a browser. It is `*`
+  for now; set it to the university's domain before deploying.
+- `spring.servlet.multipart.max-file-size: 50MB`: larger uploads get a 413.
+- Files are served with `Content-Security-Policy: sandbox` and `X-Content-Type-Options: nosniff`, so an
+  uploaded HTML file can't run scripts on the API's domain.
+
+**Known gaps:**
+
+- The index starts empty: nothing is indexed until `POST /index/refresh`. T11's startup scan fixes this.
+- Upload and refresh have no authentication; anyone who can reach the API can add files.
+- A rescan re-extracts every file. T11 can skip files whose modified time hasn't changed.
+
+**Tests:**
+
+- `SearchEngineTest` (34): real components. Covers index → search → autocomplete, the query language,
+  paging and its limits, the overflow, the autocomplete cap, remove and re-index, `getDocument`,
+  `getDocumentFile`, `indexFile`, upload (name cleaning, replace, unsupported, unreadable) and `reindexAll`
+  (nested folders, changed, deleted and unreadable files, missing repository).
+- `SearchControllerTest` (22): MockMvc against the whole application, with a temporary repository. Every
+  endpoint, ids with slashes, the defaults, 400/404/405/415/422, `Location` on upload, the file headers,
+  and CORS for an allowed and a blocked site.
+- `RestControllerExceptionHandlerTest` (9): each exception mapping, through a stub controller.
+
+The project has 270 tests, all passing. Checked by hand with `mvn spring-boot:run` and curl: refresh,
+search, autocomplete, document, file, 404 and 400 all return the JSON above.
 
 ---
 
@@ -1635,3 +1793,53 @@ flowchart LR
 - Sequence diagrams for "a document is indexed" and "a query comes in".
 - README: how to run the app, the endpoint list, supported query syntax, and how to add documents.
 - Report notes: design patterns used and why, the ranking formula, and benchmark results.
+
+---
+
+### T16 — Health checks (/actuator/health)
+
+**Status:** Done
+
+**Goal:** One URL that says whether the infrastructure the engine needs is working, for whoever runs the
+server (or a load balancer / uptime monitor).
+
+**Description:** Spring Boot Actuator (`spring-boot-starter-actuator`) publishes `GET /actuator/health`.
+Only the health endpoint is exposed over HTTP. Two custom checks in `health/` sit next to Spring's own:
+
+| Component            | Source                              | DOWN when                                              | Details                                    |
+|----------------------|-------------------------------------|--------------------------------------------------------|--------------------------------------------|
+| `documentRepository` | `DocumentRepositoryHealthIndicator` | the folder is missing, is not a folder, or can't be read | `path` (as configured), `writable`          |
+| `searchIndex`        | `SearchIndexHealthIndicator`        | the inverted index holds a document the store doesn't  | `documentsStored`, `documentsWithTerms`, `lastRefresh` |
+| `diskSpace`          | Spring                              | less than 10 MB free where uploads go                  | `free`, `total`, `threshold`                |
+| `ping`, `livenessState`, `readinessState`, `ssl` | Spring | –                                             | –                                          |
+
+```mermaid
+flowchart TD
+    A["GET /actuator/health"] --> B["documentRepository"]
+    A --> C["searchIndex"]
+    A --> D["diskSpace (repository folder)"]
+    A --> E["ping / liveness / readiness / ssl"]
+    B & C & D & E --> F{"any component DOWN?"}
+    F -- yes --> G["503, status DOWN"]
+    F -- no --> H["200, status UP"]
+```
+
+One component can be checked on its own, e.g. `GET /actuator/health/searchIndex`.
+
+- `lastRefresh` comes from the facade, which now keeps the latest `RefreshReport` (`SearchEngine.lastRefresh()`).
+  `RefreshReport` gained `finishedAt`. It is `"never"` until the first rescan.
+- An empty index is still UP: it is valid, just not useful yet.
+- A read-only repository is UP with `writable: false`: searching works, only uploads fail.
+- `documentsWithTerms` can be lower than `documentsStored`: a document with no words (e.g. a scanned PDF) has no postings.
+
+**Settings** (`application.yaml`, `management.*`): health is the only endpoint exposed, `show-details: always`,
+and the disk-space check looks at `search.repository-path`.
+
+**Known gap:** `show-details: always` lets anyone see the details, and Spring's `diskSpace` shows the full
+server path. Switch to `when-authorized` once the API has logins.
+
+**Tests:** `HealthIndicatorsTest` (7) covers each indicator: folder present, missing or a file; the path shown
+as configured; an empty index; size and last refresh after a rescan; index and store out of step.
+`HealthEndpointTest` (3) calls `/actuator/health` on the whole application: everything UP, one component on
+its own, and 503 DOWN after the repository folder is deleted. The project has 280 tests, all passing.
+Checked by hand with `mvn spring-boot:run` and curl.

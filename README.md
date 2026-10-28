@@ -5,69 +5,149 @@
 ![Spring Boot](https://img.shields.io/badge/Spring%20Boot-4.1.1-brightgreen)
 ![License](https://img.shields.io/badge/license-MIT-blue)
 
-A from-scratch search engine built as a Spring Boot REST API: it walks a folder of
-documents, extracts their text, builds an inverted index, and answers boolean and
-phrase queries over it — no Lucene, no Elasticsearch. Every data structure
-(inverted index, document store, trie, query AST) is implemented and tested in this
-repository.
+A search engine for a folder of documents, written from scratch in Java and served as a
+Spring Boot REST API. It extracts the text from each file, builds an inverted index, and
+answers boolean and phrase queries ranked by TF-IDF. There is no Lucene or Elasticsearch
+underneath: the inverted index, document store, trie and query tree are all implemented
+and tested here.
 
-Built for CSC322. The brief is in [`CSC322_final_project.pdf`](CSC322_final_project.pdf);
-the design is in [`CSC322_search_engine_class_diagram.pdf`](CSC322_search_engine_class_diagram.pdf).
+Built for CSC322. The brief is in [`CSC322_final_project.pdf`](CSC322_final_project.pdf)
+and the design in [`CSC322_search_engine_class_diagram.pdf`](CSC322_search_engine_class_diagram.pdf).
 
----
+## Features
 
-## Status
+- **Ten file formats**: PDF, Word (`.doc`, `.docx`), PowerPoint (`.ppt`, `.pptx`, `.pps`,
+  `.ppsx`), Excel (`.xls`, `.xlsx`), plain text, HTML and XML, read with Apache Tika.
+- **Boolean queries**: `AND`, `OR`, `NOT`, brackets, and words side by side meaning AND.
+- **Phrase search**: postings keep word positions, so `"machine learning"` only matches
+  documents where the two words are next to each other.
+- **TF-IDF ranking** with snippets around the matched word.
+- **Autocomplete** from a trie of every indexed word, most common first.
+- **Uploads**: a file posted to the API is saved and searchable straight away.
+- **Health checks** at `/actuator/health`.
 
-Under active development. The indexing side is complete and the query side is
-in progress — the REST endpoints are the next milestone and are **not live yet**.
+## Running it
 
-| Component | State |
+You need Java 25. Maven comes with the project (`mvnw`).
+
+```bash
+./mvnw spring-boot:run      # starts on http://localhost:8080
+./mvnw test                 # runs the tests
+./mvnw clean package        # builds target/SearchEngine-0.0.1-SNAPSHOT.jar
+```
+
+On Windows use `mvnw.cmd` instead of `./mvnw`.
+
+The index starts empty. Index the `documents/` folder once after starting:
+
+```bash
+curl -X POST localhost:8080/api/v1/index/refresh
+curl "localhost:8080/api/v1/search?q=computer"
+```
+
+## API
+
+Everything is under `/api/v1`. `GET /api/v1` lists the endpoints.
+
+| Method | Path | What it does |
+|---|---|---|
+| GET | `/search?q=&page=1&size=10` | ranked results; `size` is at most 100 |
+| GET | `/autocomplete?q=&limit=` | word suggestions for a prefix |
+| GET | `/documents/{id}` | a document's title and extracted text |
+| GET | `/files/{id}?download=false` | the original file, shown inline or downloaded |
+| POST | `/documents` | upload a file (multipart field `file`); it is indexed immediately |
+| POST | `/index/refresh` | rescan the whole document folder |
+
+A document's id is its path inside the document folder, e.g. `reports/annual.pdf`, and is
+used as-is in the URL: `/api/v1/documents/reports/annual.pdf`.
+
+Example search response:
+
+```json
+{
+  "query": "computer",
+  "totalHits": 1,
+  "tookMillis": 6,
+  "results": [
+    {
+      "documentID": "computer-science-department.html",
+      "title": "Department of Computer Science",
+      "snippet": "Department of Computer Science The Department of Computer Science offers undergraduate and…",
+      "rankingScore": 0.3745
+    }
+  ]
+}
+```
+
+Errors all have the same shape:
+
+```json
+{"status": 404, "error": "Not Found", "message": "no document with id x.txt",
+ "path": "/api/v1/documents/x.txt", "timestamp": "2026-10-27T15:18:57Z"}
+```
+
+| Status | When |
 |---|---|
-| Core models (`Token`, `Posting`, `Document`, `SearchResult`) | Done |
-| Text extraction — pdf, doc(x), ppt(x)/pps(x), xls(x), txt, html, xml | Done |
-| `TextProcessor` — tokenise, normalise, stop-word removal, stemming | Done |
-| `InvertedIndex` + `DocumentStore` | Done |
-| `Indexer` — the full indexing pipeline | Done |
-| `Trie` — prefix autocomplete | Done |
-| Query grammar and parser (ANTLR) → AST | Done |
-| `MatchingEngine` — AST evaluation | Done |
-| TF-IDF ranking and snippets | Next |
-| REST API (`/api/v1/search`) and web GUI | Planned |
-| Scheduled re-indexing | Planned |
+| 400 | missing or invalid parameter, e.g. `page=0` or `size=500` |
+| 404 | unknown document id |
+| 415 | uploaded file type isn't supported |
+| 422 | the file couldn't be read (corrupt or not what its extension says) |
+| 413 | upload larger than 50 MB |
 
-The full task-by-task plan, with flowcharts and implementation notes for each
-finished piece, lives in [`task.md`](task.md).
+## Query syntax
 
----
+| Query | Matches documents that… |
+|---|---|
+| `java spring` | contain both words (same as `java AND spring`) |
+| `java OR kotlin` | contain either word (`\|` also works) |
+| `spring NOT boot` | contain `spring` but not `boot` (`-boot` also works) |
+| `"machine learning"` | contain the exact phrase |
+| `(java OR kotlin) AND spring` | brackets group as usual |
+| `e-mail` | contain the phrase "e mail"; a hyphen inside a word is not NOT |
 
-## What it does
+Operators must be uppercase, so `or` is an ordinary word. Words are lowercased and common
+stop words (`the`, `of`, ...) are ignored; the list is in
+[`stopwords.txt`](src/main/resources/static/stopwords.txt). A query with a syntax error,
+such as an unclosed bracket, doesn't fail: its words are searched with AND.
 
-- **Indexes a folder of documents.** Point `search.repository-path` at a directory;
-  every supported file in it becomes a `Document` with an entry in the index.
-- **Reads ten document formats.** PDF, Word (`.doc`, `.docx`), PowerPoint (`.ppt`,
-  `.pptx`, `.pps`, `.ppsx`), Excel (`.xls`, `.xlsx`), plain text, HTML and XML, each
-  handled by its own `TextExtractor` behind a factory.
-- **Understands boolean queries.** `machine AND learning`, `java OR kotlin`,
-  `spring NOT boot`, `"exact phrase"`, parentheses for grouping, and two words side
-  by side treated as AND. Parsed by an ANTLR grammar into a typed AST.
-- **Supports phrase search.** Postings carry term positions, so `"machine learning"`
-  matches only documents where the words are adjacent.
-- **Autocompletes queries.** A trie is populated as documents are indexed and
-  returns ranked prefix suggestions.
+## Configuration
 
----
+`src/main/resources/application.yaml`:
 
-## Architecture
+| Setting | Default | Meaning |
+|---|---|---|
+| `search.repository-path` | `./documents` | folder that gets indexed and where uploads go |
+| `search.reindex-interval` | `PT30M` | rescan period; the brief caps it at 2 hours |
+| `search.autocomplete-limit` | `10` | most suggestions returned |
+| `search.cors-allowed-origins` | `*` | sites allowed to call the API from a browser |
+| `spring.servlet.multipart.max-file-size` | `50MB` | largest upload |
 
-Two pipelines over shared storage:
+Any of these can be overridden at start-up, e.g.
+`./mvnw spring-boot:run -Dspring-boot.run.arguments=--search.repository-path=/srv/docs`.
+
+## Health
+
+`GET /actuator/health` returns 200 when everything is up and 503 when something isn't.
+
+| Check | Down when |
+|---|---|
+| `documentRepository` | the document folder is missing or can't be read |
+| `searchIndex` | the index and the document store disagree |
+| `diskSpace` | less than 10 MB free in the document folder |
+
+`searchIndex` also reports how many documents are indexed and what the last rescan did.
+
+## How it works
+
+Two pipelines share the same storage:
 
 ```mermaid
 flowchart LR
     subgraph Indexing
-        F["File in documents/"] --> X["TextExtractor<br/>(via ExtractorFactory)"]
+        F["File in documents/"] --> X["TextExtractor<br/>(chosen by ExtractorFactory)"]
         X --> D["Document"]
         D --> I["Indexer"]
-        I --> TP1["TextProcessor"]
+        I --> TP["TextProcessor"]
     end
 
     subgraph Storage
@@ -80,12 +160,12 @@ flowchart LR
     I --> DS
     I --> TR
 
-    subgraph Query
-        Q["Raw query"] --> QP["QueryParser (ANTLR)"]
-        QP --> AST["Query AST"]
+    subgraph Search
+        Q["Query text"] --> QP["QueryParser (ANTLR)"]
+        QP --> AST["Query tree"]
         AST --> ME["MatchingEngine"]
-        ME --> RA["RankingAlgorithm"]
-        RA --> R["SearchResult list"]
+        ME --> RA["TfIdfRanking"]
+        RA --> R["SearchResults"]
     end
 
     IDX --> ME
@@ -93,110 +173,61 @@ flowchart LR
     DS --> RA
     TR --> AC["Autocomplete"]
 
-    API["SearchEngineAPI (Facade)"] -.-> I
+    REST["SearchController"] --> API["SearchEngine (facade)"]
+    API -.-> I
     API -.-> QP
     API -.-> AC
-    REST["REST controller /api/v1"] --> API
 ```
+
+- The index is `term → documentID → Posting(frequency, positions)`. Replacing or removing a
+  document is a direct lookup, and document frequency and length are kept up to date while
+  indexing, so ranking doesn't compute them per query.
+- A word's position counts the stop words that were dropped, so `"state of the art"` still
+  needs the two remaining words to be three apart.
+- Matching evaluates the query tree: a term looks itself up, AND intersects (smallest set
+  first), OR unions, NOT subtracts from all documents, a phrase checks positions.
+- Ranking scores `Σ (1 + log tf) · log(N / df)` per document, divided by the square root of
+  the document's length, and only builds snippets for the results it returns.
+
+Design patterns: Strategy (extractors, ranking), Factory (`ExtractorFactory`), Interpreter
+(query tree), Visitor (ANTLR parse tree to query tree) and Facade (`SearchEngine`).
 
 ### Packages
 
 ```
 com.daveai.searchengine
-├── models        Token, Posting, Document, SearchResult
-├── extraction    TextExtractor + per-format extractors, ExtractorFactory, DocumentLoader
+├── api           SearchController, HomeController, error handling
+├── services      SearchEngine facade
+├── models        Token, Posting, Document, SearchResult, SearchResponse, ...
+├── extraction    TextExtractor per format, ExtractorFactory, DocumentLoader
 ├── indexing      TextProcessor, Indexer, InvertedIndex, DocumentStore
 ├── autocomplete  Trie
 ├── query         QueryParser, Query, ast/ (Term, Phrase, And, Or, Not)
-├── matching      MatchingEngine                    (in progress)
-├── ranking       RankingAlgorithm, TfIdfRanking    (planned)
-├── api           SearchEngineAPI facade, controller (planned)
-├── config        SearchProperties
-└── scheduling    repository rescanning            (planned)
+├── matching      MatchingEngine
+├── ranking       RankingAlgorithm, TfIdfRanking, SnippetBuilder
+├── health        health checks for /actuator/health
+├── config        bean wiring, SearchProperties, CORS
+└── scheduling    scheduled rescans (not built yet)
 ```
 
-### Design notes
-
-- **Strategy** for extractors and for ranking, so a new format or a BM25 scorer
-  drops in without touching callers.
-- **Factory** (`ExtractorFactory`) chooses the extractor from the file extension.
-- **Composite + Interpreter** for the query AST: `AndNode`, `OrNode`, `NotNode`,
-  `PhraseNode`, `TermNode` are evaluated by the matching engine.
-- **Visitor** to turn the ANTLR parse tree into that AST.
-- **Facade** (`SearchEngineAPI`) is the single entry point the REST layer talks to.
-- The index stores `term → documentID → Posting`, so updating or deleting one
-  document is a direct lookup rather than a list scan, and document-frequency and
-  document-length statistics are maintained at index time — ranking must not do
-  that work during a query.
-
-The query grammar (`src/main/antlr4/.../SearchQuery.g4`):
-
-```antlr
-query   : orExpr? EOF ;
-orExpr  : andExpr (OR andExpr)* ;
-andExpr : notExpr (AND? notExpr)* ;   // two words side by side mean AND
-notExpr : NOT notExpr | primary ;
-primary : LPAREN orExpr RPAREN | PHRASE | TERM ;
-```
-
----
-
-## Running it
-
-**Requirements:** Java 25 and Maven (the bundled `mvnw` wrapper is fine).
-
-```bash
-git clone <this-repo>
-cd SearchEngine
-
-./mvnw spring-boot:run      # starts the app on http://localhost:8080
-./mvnw test                 # runs the test suite
-./mvnw clean package        # builds an executable jar in target/
-```
-
-On Windows, use `mvnw.cmd` in place of `./mvnw`.
-
-### Configuration
-
-`src/main/resources/application.yaml`:
-
-```yaml
-search:
-  repository-path: ./documents   # folder that gets indexed
-  reindex-interval: PT30M        # rescan period (the brief caps this at 2 hours)
-  autocomplete-limit: 10         # max suggestions returned
-```
-
-Drop files into `documents/` to have them indexed. A few samples are included.
-
----
+The query grammar is [`SearchQuery.g4`](src/main/antlr4/com/daveai/searchengine/query/SearchQuery.g4).
 
 ## Tests
 
-The project is written test-first, as the brief requires. Every component has a unit
-test beside it under `src/test/java`, and the extractors are exercised against real
-sample files (`src/test/resources/samples/`) — one per supported format. 191 tests
-currently pass; they run on every push through GitHub Actions.
+287 tests, run on every push by GitHub Actions. Each class has a unit test next to it, the
+extractors run against a real sample of every format in `src/test/resources/samples/`, and
+the API is tested end to end with MockMvc against a temporary document folder.
 
-```bash
-./mvnw test
-```
+## Status and limits
 
----
+- Not built yet: the scheduled rescan (the folder is only indexed on `POST /index/refresh`
+  and on upload), a web GUI, and the 0.01 s performance check.
+- The index lives in memory and is rebuilt from the files on each rescan.
+- Upload and refresh have no authentication. Put the API behind one, and narrow
+  `search.cors-allowed-origins`, before exposing it beyond a trusted network.
 
-## Repository layout
-
-```
-documents/                the document repository that gets indexed
-src/main/antlr4/          the query grammar
-src/main/java/            application code
-src/main/resources/       application.yaml, stop-word list
-src/test/                 tests and sample documents
-task.md                   the full build plan, per-task flowcharts and notes
-```
-
----
+[`task.md`](task.md) has the full build plan, with a flowchart and notes for each task.
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+MIT, see [LICENSE](LICENSE).

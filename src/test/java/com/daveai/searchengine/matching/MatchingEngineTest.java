@@ -21,10 +21,9 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
- * Tests for T8, written before {@code MatchingEngine} exists (the brief asks for test-first),
- * so this class does not compile until it does.
+ * Tests for T8, written before {@code MatchingEngine} existed (the brief asks for test-first).
  * <p>
- * The contract these tests assume:
+ * The contract they check:
  * <ul>
  *   <li>{@code MatchingEngine(InvertedIndex)} — the same constructor style as {@code Indexer}.</li>
  *   <li>{@code Set<String> retrieve(Query)} — the ids of the documents satisfying the query,
