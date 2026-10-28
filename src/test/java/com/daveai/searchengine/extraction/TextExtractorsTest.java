@@ -1,15 +1,24 @@
 package com.daveai.searchengine.extraction;
 
+import org.apache.pdfbox.pdmodel.PDDocument;
+import org.apache.pdfbox.pdmodel.PDPage;
+import org.apache.tika.metadata.Metadata;
+import org.apache.tika.parser.EmptyParser;
+import org.apache.tika.parser.ParseContext;
+import org.apache.tika.parser.Parser;
 import org.junit.jupiter.api.Test;
+import org.xml.sax.ContentHandler;
 import org.junit.jupiter.api.io.TempDir;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.Arguments;
 import org.junit.jupiter.params.provider.MethodSource;
 
 import java.io.IOException;
+import org.apache.tika.io.TikaInputStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Locale;
+import java.util.Map;
 import java.util.stream.Stream;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -103,5 +112,33 @@ class TextExtractorsTest {
 
         assertThatThrownBy(() -> new PdfExtractor().extract(broken))
                 .isInstanceOf(DocumentExtractionException.class);
+    }
+
+    @Test
+    void pdfPageWithNoTextGivesEmptyTextInsteadOfTryingOcr(@TempDir Path folder) throws IOException {
+        // a page with no text layer, like a scan; Tika's default would try OCR, and no OCR engine is installed
+        Path scanned = folder.resolve("scanned.pdf");
+        try (PDDocument pdf = new PDDocument()) {
+            pdf.addPage(new PDPage());
+            pdf.save(scanned.toFile());
+        }
+
+        assertThat(new PdfExtractor().extract(scanned).text()).isEmpty();
+    }
+
+    @Test
+    void anUnexpectedParserErrorBecomesDocumentExtractionException(@TempDir Path folder) throws IOException {
+        Path file = Files.writeString(folder.resolve("any.txt"), "text");
+        Parser crashing = new EmptyParser() {
+            @Override
+            public void parse(TikaInputStream stream, ContentHandler handler, Metadata metadata, ParseContext context) {
+                throw new NullPointerException("bug inside the parser");
+            }
+        };
+        TextExtractor extractor = new TikaTextExtractor(Map.of("txt", crashing)) { };
+
+        assertThatThrownBy(() -> extractor.extract(file))
+                .isInstanceOf(DocumentExtractionException.class)
+                .hasCauseInstanceOf(NullPointerException.class);
     }
 }

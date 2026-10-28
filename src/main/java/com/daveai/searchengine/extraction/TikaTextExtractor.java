@@ -54,6 +54,10 @@ public abstract class TikaTextExtractor implements TextExtractor {
             parser.parse(stream, text, metadata, new ParseContext());
         } catch (IOException | SAXException | TikaException e) {
             throw new DocumentExtractionException(file, e);
+        } catch (RuntimeException e) {
+            // a bug inside a parser on an odd file (e.g. a NullPointerException) is still "this file can't be read",
+            // so one bad file gives a 422 on upload and is skipped by a rescan instead of stopping it
+            throw new DocumentExtractionException(file, e);
         }
         return new ExtractedContent(text.toString().strip(), metadata.get(TikaCoreProperties.TITLE));
     }
