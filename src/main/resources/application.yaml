@@ -1,6 +1,11 @@
 spring:
   application:
     name: SearchEngine
+  servlet:
+    multipart:
+      # largest file accepted by POST /api/v1/documents; bigger uploads get a 413
+      max-file-size: 50MB
+      max-request-size: 50MB
 
 search:
   # Folder whose files are indexed (the "document repository" from the brief).
@@ -9,3 +14,6 @@ search:
   reindex-interval: PT30M
   # Maximum number of autocomplete suggestions returned.
   autocomplete-limit: 10
+  # Sites allowed to call the API from a browser (comma-separated), e.g. https://www.university.edu.
+  # "*" allows any site; narrow it before deploying.
+  cors-allowed-origins: "*"
