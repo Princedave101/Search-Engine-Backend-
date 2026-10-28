@@ -17,3 +17,19 @@ search:
   # Sites allowed to call the API from a browser (comma-separated), e.g. https://www.university.edu.
   # "*" allows any site; narrow it before deploying.
   cors-allowed-origins: "*"
+
+management:
+  endpoints:
+    web:
+      exposure:
+        # only the health endpoint is published over HTTP
+        include: health
+  endpoint:
+    health:
+      # show each check (documentRepository, searchIndex, diskSpace) and its details.
+      # diskSpace shows the server's full path; use "when-authorized" once the API has logins.
+      show-details: always
+  health:
+    diskspace:
+      # check free space where uploads are written, not the folder the app was started from
+      path: ${search.repository-path}

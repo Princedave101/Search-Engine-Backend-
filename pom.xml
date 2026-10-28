@@ -32,6 +32,12 @@
             <artifactId>spring-boot-starter-webmvc</artifactId>
         </dependency>
 
+        <!-- Health endpoint: /actuator/health -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-actuator</artifactId>
+        </dependency>
+
         <!-- Text extraction (T5). Only the parser modules for the formats in the brief. -->
         <dependency>
             <groupId>org.apache.tika</groupId>
